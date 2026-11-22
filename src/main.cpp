@@ -6,6 +6,7 @@
 #include "types.h"
 
 #include <windows.h>
+#include <roapi.h>
 #include <shellapi.h>
 #include <shlobj.h>
 #include <algorithm>
@@ -380,6 +381,7 @@ struct AppState {
     ULONGLONG lastConfigEditMs = 0;
     ULONGLONG lastFgCheckMs = 0;
     std::wstring currentAppExe;
+    HWND currentAppHwnd = nullptr;
     bool currentAppIsGame = false;
     bool exclusiveFullscreen = false;
     ULONGLONG gameEnteredMs = 0;
@@ -454,12 +456,14 @@ void SyncOverlayAndHotkey(AppState& state) {
             state.sidebar.SetOpen(false);
         }
         bool allow = (!state.config.onlyInGames || state.currentAppIsGame) && !isFse;
-        state.overlay.SetActive((state.config.activeProfile != 0) && allow, isFse ? nullptr : state.sidebar.Hwnd());
+        state.overlay.SetActive((state.config.activeProfile != 0) && allow,
+                               isFse ? nullptr : state.sidebar.Hwnd(),
+                               state.currentAppHwnd);
     } else {
         if (state.sidebar.IsOpen()) {
             state.sidebar.SetOpen(false);
         }
-        state.overlay.SetActive(false, isFse ? nullptr : state.sidebar.Hwnd());
+        state.overlay.SetActive(false, isFse ? nullptr : state.sidebar.Hwnd(), nullptr);
     }
 }
 
@@ -606,7 +610,7 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
 
 int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    RoInitialize(RO_INIT_SINGLETHREADED);
 
     int argc = 0;
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
@@ -615,20 +619,20 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
         if (wcscmp(argv[i], L"--self-test") == 0) {
             LocalFree(argv);
             int rc = RunFullSelfTest();
-            CoUninitialize();
+            RoUninitialize();
             return rc;
         }
         if (wcscmp(argv[i], L"--export-shaders") == 0 && (i + 1) < argc) {
             std::filesystem::path outDir(argv[i + 1]);
             LocalFree(argv);
             int rc = ExportShadersToDir(outDir);
-            CoUninitialize();
+            RoUninitialize();
             return rc;
         }
         if (wcscmp(argv[i], L"--uninstall") == 0) {
             LocalFree(argv);
             int rc = RunUninstall();
-            CoUninitialize();
+            RoUninitialize();
             return rc;
         }
         if (wcscmp(argv[i], L"--minimized") == 0) {
@@ -651,7 +655,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
             );
         }
         CloseHandle(hMutex);
-        CoUninitialize();
+        RoUninitialize();
         return 0;
     }
 
@@ -677,7 +681,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
     if (!state.trayHwnd) {
         MessageBoxW(nullptr, L"Failed to create application window.", L"Error", MB_OK | MB_ICONERROR);
         if (hMutex) CloseHandle(hMutex);
-        CoUninitialize();
+        RoUninitialize();
         return 1;
     }
 
@@ -686,7 +690,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
         MessageBoxA(nullptr, err.c_str(), "DirectX 11 Initialization Failed", MB_OK | MB_ICONERROR);
         DestroyWindow(state.trayHwnd);
         if (hMutex) CloseHandle(hMutex);
-        CoUninitialize();
+        RoUninitialize();
         return 1;
     }
 
@@ -711,7 +715,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
         state.overlay.Shutdown();
         DestroyWindow(state.trayHwnd);
         if (hMutex) CloseHandle(hMutex);
-        CoUninitialize();
+        RoUninitialize();
         return 1;
     }
 
@@ -742,7 +746,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
         state.overlay.Shutdown();
         DestroyWindow(state.trayHwnd);
         if (hMutex) CloseHandle(hMutex);
-        CoUninitialize();
+        RoUninitialize();
         return 1;
     }
 
@@ -770,6 +774,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
     ForegroundAppInfo initFg;
     if (DetectActiveForegroundApp(selfPid, initFg, &state.config.customGameWhitelist, &state.config.customGameBlacklist)) {
         state.currentAppExe = initFg.exeName;
+        state.currentAppHwnd = initFg.hwnd;
         state.currentAppIsGame = initFg.isGame;
         state.sidebar.SetActiveAppInfo(initFg.exeName, initFg.displayName, initFg.isGame, initFg.engineTag);
         state.controlHub.SetActiveAppInfo(initFg.exeName, initFg.displayName, initFg.isGame, initFg.engineTag);
@@ -806,8 +811,10 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
             bool changedFse = (isFse != state.exclusiveFullscreen);
             if (DetectActiveForegroundApp(selfPid, fg, &state.config.customGameWhitelist, &state.config.customGameBlacklist)) {
                 bool changedApp = (fg.exeName != state.currentAppExe);
+                bool changedHwnd = (fg.hwnd != state.currentAppHwnd);
                 bool changedGameState = (fg.isGame != state.currentAppIsGame);
                 state.currentAppExe = fg.exeName;
+                state.currentAppHwnd = fg.hwnd;
                 state.currentAppIsGame = fg.isGame;
                 state.exclusiveFullscreen = isFse;
 
@@ -829,12 +836,12 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
                 }
                 if (!fg.isGame || isFse) {
                     state.gameEnteredMs = 0;
-                    if (changedApp || changedGameState || changedFse) {
+                    if (changedApp || changedGameState || changedFse || changedHwnd) {
                         SyncOverlayAndHotkey(state);
                     }
                 } else if (fg.isGame && !wasGame) {
                     state.gameEnteredMs = now;
-                } else if (changedApp || changedGameState || changedFse) {
+                } else if (changedApp || changedGameState || changedFse || changedHwnd) {
                     if (state.gameEnteredMs == 0) {
                         SyncOverlayAndHotkey(state);
                     }
@@ -901,6 +908,6 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
     DestroyWindow(state.trayHwnd);
 
     if (hMutex) CloseHandle(hMutex);
-    CoUninitialize();
+    RoUninitialize();
     return 0;
 }

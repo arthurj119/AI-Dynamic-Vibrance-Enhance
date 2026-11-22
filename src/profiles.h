@@ -15,6 +15,7 @@ struct ForegroundAppInfo {
     std::wstring displayName;
     bool isGame = false;
     std::wstring engineTag;
+    HWND hwnd = nullptr;
 };
 
 std::string WideToUtf8(const std::wstring& w);

@@ -3,12 +3,24 @@
 #include "shader_source.h"
 
 #include <d3dcompiler.h>
+#include <dwmapi.h>
+#include <roapi.h>
+#include <windows.foundation.h>
+#include <windows.graphics.capture.interop.h>
+#include <winstring.h>
+#include <wrl/event.h>
+#include <wrl/wrappers/corewrappers.h>
 #include <algorithm>
 #include <cstring>
 #include <sstream>
 #include <vector>
 
+#ifndef WDA_NONE
+#define WDA_NONE 0x00000000
+#endif
+
 using Microsoft::WRL::ComPtr;
+using Microsoft::WRL::Wrappers::HStringReference;
 
 namespace {
 
@@ -162,11 +174,12 @@ bool Dx11Overlay::CreateOverlayWindow(HINSTANCE hInst, std::string& outError) {
         SetLayeredWindowAttributes(hwndOverlay_, 0, 255, LWA_ALPHA);
     }
 
-    // Crucial: prevent desktop duplication from capturing our own overlay
+    // Start capture-excluded; WGC per-window capture toggles WDA_NONE safely after InitWgc
     if (!SetWindowDisplayAffinity(hwndOverlay_, WDA_EXCLUDEFROMCAPTURE)) {
         outError = "SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE) failed (" + std::to_string(GetLastError()) + ")";
         return false;
     }
+    overlayCapturable_ = false;
 
     ShowWindow(hwndOverlay_, SW_HIDE);
     return true;
@@ -293,6 +306,12 @@ bool Dx11Overlay::CreateDeviceAndResources(std::string& outError) {
     hr = device_->CreateRasterizerState(&rsDesc, &rasterState_);
     if (FAILED(hr)) { outError = "CreateRasterizerState failed: " + HrToString(hr); return false; }
 
+    wgcFrameEvent_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    ComPtr<IInspectable> wgcInsp;
+    if (SUCCEEDED(CreateDirect3D11DeviceFromDXGIDevice(dxgiDevice.Get(), &wgcInsp)) && wgcInsp) {
+        wgcInsp.As(&wgcDevice_);
+    }
+
     // SwapChain (DirectComposition preferred, HWND fallback if needed)
     DXGI_SWAP_CHAIN_DESC1 scDesc{};
     scDesc.Width = static_cast<UINT>(screenW_);
@@ -303,7 +322,7 @@ bool Dx11Overlay::CreateDeviceAndResources(std::string& outError) {
     scDesc.BufferCount = 2;
     scDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
     scDesc.Scaling = DXGI_SCALING_STRETCH;
-    scDesc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
+    scDesc.AlphaMode = useDComp_ ? DXGI_ALPHA_MODE_PREMULTIPLIED : DXGI_ALPHA_MODE_IGNORE;
 
     if (useDComp_) {
         hr = DCompositionCreateDevice(dxgiDevice.Get(), IID_PPV_ARGS(&dcompDevice_));
@@ -331,6 +350,7 @@ bool Dx11Overlay::CreateDeviceAndResources(std::string& outError) {
 
     if (!useDComp_) {
         scDesc.Scaling = DXGI_SCALING_NONE;
+        scDesc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
         hr = factory2->CreateSwapChainForHwnd(device_.Get(), hwndOverlay_, &scDesc, nullptr, nullptr, &swapChain_);
         if (FAILED(hr)) {
             outError = "CreateSwapChainForHwnd failed: " + HrToString(hr);
@@ -360,7 +380,13 @@ bool Dx11Overlay::Initialize(HINSTANCE hInst, std::string& outError) {
 }
 
 void Dx11Overlay::Shutdown() {
+    ReleaseWgc();
     ReleaseDuplication();
+    wgcDevice_.Reset();
+    if (wgcFrameEvent_) {
+        CloseHandle(wgcFrameEvent_);
+        wgcFrameEvent_ = nullptr;
+    }
     capturedSRV_.Reset();
     capturedTex_.Reset();
     rtv_.Reset();
@@ -385,11 +411,29 @@ void Dx11Overlay::Shutdown() {
         DestroyWindow(hwndOverlay_);
         hwndOverlay_ = nullptr;
     }
+    targetHwnd_ = nullptr;
     active_ = false;
     hasCapturedFrame_ = false;
+    overlayCapturable_ = false;
+}
+
+bool Dx11Overlay::SetOverlayCaptureVisibility(bool allowCapture) {
+    if (overlayCapturable_ == allowCapture) return true;
+    if (!hwndOverlay_) {
+        overlayCapturable_ = false;
+        return false;
+    }
+    if (SetWindowDisplayAffinity(hwndOverlay_, allowCapture ? WDA_NONE : WDA_EXCLUDEFROMCAPTURE)) {
+        overlayCapturable_ = allowCapture;
+        return true;
+    }
+    return false;
 }
 
 bool Dx11Overlay::InitDuplication() {
+    // Critical feedback-loop invariant: exclude overlay from capture BEFORE DuplicateOutput
+    ReleaseWgc();
+    SetOverlayCaptureVisibility(false);
     if (duplication_) return true;
     if (!output1_ || !device_) return false;
 
@@ -408,14 +452,156 @@ void Dx11Overlay::ReleaseDuplication() {
     hasCapturedFrame_ = false;
 }
 
-void Dx11Overlay::SetActive(bool active, HWND sidebarHwnd) {
+bool Dx11Overlay::InitWgc(HWND targetHwnd) {
+    if (usingWgc_ && wgcSession_) return true;
+    if (!targetHwnd || !IsWindow(targetHwnd) || IsIconic(targetHwnd) || !wgcDevice_) {
+        return false;
+    }
+
+    ULONGLONG now = GetTickCount64();
+    if (lastWgcRetryMs_ != 0 && (now - lastWgcRetryMs_) < 250) {
+        return false;
+    }
+    lastWgcRetryMs_ = now;
+
+    ReleaseDuplication();
+
+    ComPtr<IGraphicsCaptureItemInterop> interop;
+    HRESULT hr = RoGetActivationFactory(
+        HStringReference(RuntimeClass_Windows_Graphics_Capture_GraphicsCaptureItem).Get(),
+        IID_PPV_ARGS(&interop)
+    );
+    if (FAILED(hr) || !interop) return false;
+
+    ComPtr<ABI::Windows::Graphics::Capture::IGraphicsCaptureItem> item;
+    hr = interop->CreateForWindow(targetHwnd, IID_PPV_ARGS(&item));
+    if (FAILED(hr) || !item) return false;
+
+    ABI::Windows::Graphics::SizeInt32 itemSize{};
+    hr = item->get_Size(&itemSize);
+    if (FAILED(hr) || itemSize.Width <= 0 || itemSize.Height <= 0) return false;
+
+    ComPtr<ABI::Windows::Graphics::Capture::IDirect3D11CaptureFramePoolStatics2> poolStatics;
+    hr = RoGetActivationFactory(
+        HStringReference(RuntimeClass_Windows_Graphics_Capture_Direct3D11CaptureFramePool).Get(),
+        IID_PPV_ARGS(&poolStatics)
+    );
+    if (FAILED(hr) || !poolStatics) return false;
+
+    ComPtr<ABI::Windows::Graphics::Capture::IDirect3D11CaptureFramePool> pool;
+    hr = poolStatics->CreateFreeThreaded(
+        wgcDevice_.Get(),
+        ABI::Windows::Graphics::DirectX::DirectXPixelFormat_B8G8R8A8UIntNormalized,
+        2,
+        itemSize,
+        &pool
+    );
+    if (FAILED(hr) || !pool) return false;
+
+    auto closePool = [&]() {
+        ComPtr<ABI::Windows::Foundation::IClosable> cl;
+        if (SUCCEEDED(pool.As(&cl)) && cl) cl->Close();
+    };
+
+    EventRegistrationToken tok{};
+    auto cb = Microsoft::WRL::Callback<
+        Microsoft::WRL::Implements<
+            Microsoft::WRL::RuntimeClassFlags<Microsoft::WRL::ClassicCom>,
+            __FITypedEventHandler_2_Windows__CGraphics__CCapture__CDirect3D11CaptureFramePool_IInspectable,
+            Microsoft::WRL::FtmBase>
+    >([ev = wgcFrameEvent_](
+        ABI::Windows::Graphics::Capture::IDirect3D11CaptureFramePool*,
+        IInspectable*
+    ) -> HRESULT {
+        if (ev) SetEvent(ev);
+        return S_OK;
+    });
+    if (!cb || FAILED(pool->add_FrameArrived(cb.Get(), &tok))) {
+        closePool();
+        return false;
+    }
+
+    ComPtr<ABI::Windows::Graphics::Capture::IGraphicsCaptureSession> session;
+    hr = pool->CreateCaptureSession(item.Get(), &session);
+    if (FAILED(hr) || !session) {
+        pool->remove_FrameArrived(tok);
+        closePool();
+        return false;
+    }
+
+    ComPtr<ABI::Windows::Graphics::Capture::IGraphicsCaptureSession2> session2;
+    if (SUCCEEDED(session.As(&session2)) && session2) {
+        session2->put_IsCursorCaptureEnabled(FALSE);
+    }
+    ComPtr<ABI::Windows::Graphics::Capture::IGraphicsCaptureSession3> session3;
+    if (SUCCEEDED(session.As(&session3)) && session3) {
+        session3->put_IsBorderRequired(FALSE);
+    }
+
+    if (wgcFrameEvent_) ResetEvent(wgcFrameEvent_);
+    hr = session->StartCapture();
+    if (FAILED(hr)) {
+        ComPtr<ABI::Windows::Foundation::IClosable> sCl;
+        if (SUCCEEDED(session.As(&sCl)) && sCl) sCl->Close();
+        pool->remove_FrameArrived(tok);
+        closePool();
+        return false;
+    }
+
+    wgcItem_ = std::move(item);
+    wgcFramePool_ = std::move(pool);
+    wgcSession_ = std::move(session);
+    wgcFrameToken_ = tok;
+    wgcTokenRegistered_ = true;
+    wgcPoolSize_ = itemSize;
+    usingWgc_ = true;
+    hasCapturedFrame_ = false;
+
+    // Safe to allow OBS / Windows Screenshots to capture our overlay now that we capture ONLY targetHwnd
+    SetOverlayCaptureVisibility(true);
+    return true;
+}
+
+void Dx11Overlay::ReleaseWgc() {
+    SetOverlayCaptureVisibility(false);
+    if (wgcFramePool_ && wgcTokenRegistered_) {
+        wgcFramePool_->remove_FrameArrived(wgcFrameToken_);
+        wgcTokenRegistered_ = false;
+    }
+    if (wgcSession_) {
+        ComPtr<ABI::Windows::Foundation::IClosable> cl;
+        if (SUCCEEDED(wgcSession_.As(&cl)) && cl) cl->Close();
+        wgcSession_.Reset();
+    }
+    if (wgcFramePool_) {
+        ComPtr<ABI::Windows::Foundation::IClosable> cl;
+        if (SUCCEEDED(wgcFramePool_.As(&cl)) && cl) cl->Close();
+        wgcFramePool_.Reset();
+    }
+    wgcItem_.Reset();
+    wgcPoolSize_ = { 0, 0 };
+    usingWgc_ = false;
+    hasCapturedFrame_ = false;
+}
+
+void Dx11Overlay::SetActive(bool active, HWND sidebarHwnd, HWND targetHwnd) {
     lastSidebarHwnd_ = sidebarHwnd;
     if (active && IsExclusiveFullscreenActive()) {
         active = false;
     }
+    bool targetChanged = (targetHwnd != targetHwnd_);
+    targetHwnd_ = targetHwnd;
+
     if (active_ == active) {
-        if (!active_ && hwndOverlay_ && IsWindowVisible(hwndOverlay_) &&
-            (!useDComp_ || !sidebarHwnd || !IsWindowVisible(sidebarHwnd) || IsExclusiveFullscreenActive())) {
+        if (active_ && targetChanged) {
+            ReleaseWgc();
+            ReleaseDuplication();
+            lastWgcRetryMs_ = 0;
+            if (!(targetHwnd_ && IsWindow(targetHwnd_) && !IsIconic(targetHwnd_) && InitWgc(targetHwnd_))) {
+                InitDuplication();
+            }
+        } else if (!active_ && hwndOverlay_ && IsWindowVisible(hwndOverlay_) &&
+                   (!useDComp_ || !sidebarHwnd || !IsWindowVisible(sidebarHwnd) || IsExclusiveFullscreenActive())) {
             ShowWindow(hwndOverlay_, SW_HIDE);
         }
         return;
@@ -425,7 +611,10 @@ void Dx11Overlay::SetActive(bool active, HWND sidebarHwnd) {
 
     if (active_) {
         visualAttached_ = false;
-        InitDuplication();
+        lastWgcRetryMs_ = 0;
+        if (!(targetHwnd_ && IsWindow(targetHwnd_) && !IsIconic(targetHwnd_) && InitWgc(targetHwnd_))) {
+            InitDuplication();
+        }
     } else {
         if (useDComp_ && dcompTarget_ && dcompDevice_) {
             if (visualAttached_) {
@@ -437,6 +626,7 @@ void Dx11Overlay::SetActive(bool active, HWND sidebarHwnd) {
         if (!useDComp_ || !sidebarHwnd || !IsWindowVisible(sidebarHwnd) || IsExclusiveFullscreenActive()) {
             ShowWindow(hwndOverlay_, SW_HIDE);
         }
+        ReleaseWgc();
         ReleaseDuplication();
     }
 }
@@ -543,11 +733,35 @@ bool Dx11Overlay::RenderInternal(const FilterParams& params, bool splitPreview, 
     context_->CSSetUnorderedAccessViews(0, 1, nullUAVs, nullptr);
     context_->CSSetShaderResources(0, 1, nullSRVs);
 
-    // Pass 2: Fullscreen Pixel Shader enhancement
+    // Pass 2: Pixel Shader enhancement (windowed rect under WGC, fullscreen under Desktop Duplication)
     D3D11_VIEWPORT vp{};
+    vp.TopLeftX = 0.0f;
+    vp.TopLeftY = 0.0f;
     vp.Width = static_cast<float>(screenW_);
     vp.Height = static_cast<float>(screenH_);
     vp.MaxDepth = 1.0f;
+
+    if (usingWgc_ && targetHwnd_ && IsWindow(targetHwnd_)) {
+        RECT winRc{};
+        if (FAILED(DwmGetWindowAttribute(targetHwnd_, DWMWA_EXTENDED_FRAME_BOUNDS, &winRc, sizeof(winRc)))) {
+            GetWindowRect(targetHwnd_, &winRc);
+        }
+        int w = winRc.right - winRc.left;
+        int h = winRc.bottom - winRc.top;
+        if (w <= 0 || h <= 0 || winRc.right <= 0 || winRc.bottom <= 0 ||
+            winRc.left >= screenW_ || winRc.top >= screenH_) {
+            return false;
+        }
+        vp.TopLeftX = static_cast<float>(winRc.left);
+        vp.TopLeftY = static_cast<float>(winRc.top);
+        vp.Width = static_cast<float>(w);
+        vp.Height = static_cast<float>(h);
+    }
+
+    if (useDComp_) {
+        const float clearZero[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+        context_->ClearRenderTargetView(rtv_.Get(), clearZero);
+    }
 
     ID3D11RenderTargetView* rtvArr[1] = { rtv_.Get() };
     ID3D11ShaderResourceView* psSRVs[2] = { capturedSRV_.Get(), statsSRV_.Get() };
@@ -595,7 +809,87 @@ bool Dx11Overlay::RenderInternal(const FilterParams& params, bool splitPreview, 
 
 bool Dx11Overlay::TickAndRender(const FilterParams& params, bool splitPreview, float splitPos, bool forceRedraw) {
     if (!active_) return false;
-    if (!duplication_ && !InitDuplication()) {
+    if (!usingWgc_ && !duplication_) {
+        if (!(targetHwnd_ && IsWindow(targetHwnd_) && !IsIconic(targetHwnd_) && InitWgc(targetHwnd_))) {
+            if (!InitDuplication()) {
+                return false;
+            }
+        }
+    }
+
+    if (usingWgc_) {
+        if (!targetHwnd_ || !IsWindow(targetHwnd_) || IsIconic(targetHwnd_) || !wgcFramePool_) {
+            ReleaseWgc();
+            return false;
+        }
+
+        ComPtr<ABI::Windows::Graphics::Capture::IDirect3D11CaptureFrame> latestFrame;
+        auto drainFrames = [&]() {
+            while (true) {
+                ComPtr<ABI::Windows::Graphics::Capture::IDirect3D11CaptureFrame> next;
+                if (FAILED(wgcFramePool_->TryGetNextFrame(&next)) || !next) {
+                    break;
+                }
+                if (latestFrame) {
+                    ComPtr<ABI::Windows::Foundation::IClosable> prevCl;
+                    if (SUCCEEDED(latestFrame.As(&prevCl)) && prevCl) prevCl->Close();
+                }
+                latestFrame = std::move(next);
+            }
+        };
+
+        drainFrames();
+        if (!latestFrame && wgcFrameEvent_) {
+            WaitForSingleObject(wgcFrameEvent_, 8);
+            drainFrames();
+        }
+
+        if (!latestFrame) {
+            if (forceRedraw && hasCapturedFrame_) {
+                return RenderInternal(params, splitPreview, splitPos);
+            }
+            return false;
+        }
+
+        ABI::Windows::Graphics::SizeInt32 contentSize{};
+        if (SUCCEEDED(latestFrame->get_ContentSize(&contentSize)) &&
+            contentSize.Width > 0 && contentSize.Height > 0 &&
+            (contentSize.Width != wgcPoolSize_.Width || contentSize.Height != wgcPoolSize_.Height)) {
+            wgcPoolSize_ = contentSize;
+            wgcFramePool_->Recreate(
+                wgcDevice_.Get(),
+                ABI::Windows::Graphics::DirectX::DirectXPixelFormat_B8G8R8A8UIntNormalized,
+                2,
+                wgcPoolSize_
+            );
+        }
+
+        bool copied = false;
+        ComPtr<ABI::Windows::Graphics::DirectX::Direct3D11::IDirect3DSurface> surf;
+        if (SUCCEEDED(latestFrame->get_Surface(&surf)) && surf) {
+            ComPtr<Windows::Graphics::DirectX::Direct3D11::IDirect3DDxgiInterfaceAccess> access;
+            if (SUCCEEDED(surf.As(&access)) && access) {
+                ComPtr<ID3D11Texture2D> wgcTex;
+                if (SUCCEEDED(access->GetInterface(IID_PPV_ARGS(&wgcTex))) && wgcTex) {
+                    D3D11_TEXTURE2D_DESC desc{};
+                    wgcTex->GetDesc(&desc);
+                    if (EnsureCapturedTexture(desc)) {
+                        context_->CopyResource(capturedTex_.Get(), wgcTex.Get());
+                        hasCapturedFrame_ = true;
+                        copied = true;
+                    }
+                }
+            }
+        }
+
+        ComPtr<ABI::Windows::Foundation::IClosable> frameCl;
+        if (SUCCEEDED(latestFrame.As(&frameCl)) && frameCl) {
+            frameCl->Close();
+        }
+
+        if (copied) {
+            return RenderInternal(params, splitPreview, splitPos);
+        }
         return false;
     }
 
@@ -706,13 +1000,71 @@ bool Dx11Overlay::RunSelfTest(std::string& outReport) {
         nullptr, nullptr, wc.hInstance, nullptr
     );
     BOOL affOk = testWnd ? SetWindowDisplayAffinity(testWnd, WDA_EXCLUDEFROMCAPTURE) : FALSE;
+
+    // 3B. Verify WinRT Windows Graphics Capture (OBS-Recordable Mode)
+    HWND wgcWnd = CreateWindowExW(
+        WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE,
+        wc.lpszClassName, L"WGC Test", WS_POPUP, -200, -200, 64, 64,
+        nullptr, nullptr, wc.hInstance, nullptr
+    );
+    bool wgcOk = false;
+    std::string wgcErr = "WGC window creation failed.";
+    if (wgcWnd) {
+        SetLayeredWindowAttributes(wgcWnd, 0, 1, LWA_ALPHA);
+        ShowWindow(wgcWnd, SW_SHOWNOACTIVATE);
+        UpdateWindow(wgcWnd);
+
+        ComPtr<IInspectable> wgcInsp;
+        ComPtr<ABI::Windows::Graphics::DirectX::Direct3D11::IDirect3DDevice> wgcDev;
+        ComPtr<IGraphicsCaptureItemInterop> interop;
+        ComPtr<ABI::Windows::Graphics::Capture::IGraphicsCaptureItem> item;
+        ComPtr<ABI::Windows::Graphics::Capture::IDirect3D11CaptureFramePoolStatics2> poolStatics;
+        ComPtr<ABI::Windows::Graphics::Capture::IDirect3D11CaptureFramePool> pool;
+        ComPtr<ABI::Windows::Graphics::Capture::IGraphicsCaptureSession> sess;
+
+        if (FAILED(hr = CreateDirect3D11DeviceFromDXGIDevice(dxgiDev.Get(), &wgcInsp)) ||
+            FAILED(hr = wgcInsp.As(&wgcDev))) {
+            wgcErr = "CreateDirect3D11DeviceFromDXGIDevice failed: " + HrToString(hr);
+        } else if (FAILED(hr = RoGetActivationFactory(HStringReference(RuntimeClass_Windows_Graphics_Capture_GraphicsCaptureItem).Get(), IID_PPV_ARGS(&interop)))) {
+            wgcErr = "RoGetActivationFactory(GraphicsCaptureItem) failed: " + HrToString(hr);
+        } else if (FAILED(hr = interop->CreateForWindow(wgcWnd, IID_PPV_ARGS(&item)))) {
+            wgcErr = "IGraphicsCaptureItemInterop::CreateForWindow failed: " + HrToString(hr);
+        } else if (FAILED(hr = RoGetActivationFactory(HStringReference(RuntimeClass_Windows_Graphics_Capture_Direct3D11CaptureFramePool).Get(), IID_PPV_ARGS(&poolStatics)))) {
+            wgcErr = "RoGetActivationFactory(Direct3D11CaptureFramePool) failed: " + HrToString(hr);
+        } else if (FAILED(hr = poolStatics->CreateFreeThreaded(wgcDev.Get(), ABI::Windows::Graphics::DirectX::DirectXPixelFormat_B8G8R8A8UIntNormalized, 2, { 64, 64 }, &pool))) {
+            wgcErr = "CreateFreeThreaded failed: " + HrToString(hr);
+        } else if (FAILED(hr = pool->CreateCaptureSession(item.Get(), &sess)) || !sess) {
+            wgcErr = "CreateCaptureSession failed: " + HrToString(hr);
+        } else {
+            ComPtr<ABI::Windows::Graphics::Capture::IGraphicsCaptureSession3> sess3;
+            if (SUCCEEDED(sess.As(&sess3)) && sess3) {
+                sess3->put_IsBorderRequired(FALSE);
+            }
+            wgcOk = true;
+        }
+        if (sess) {
+            ComPtr<ABI::Windows::Foundation::IClosable> cl;
+            if (SUCCEEDED(sess.As(&cl)) && cl) cl->Close();
+        }
+        if (pool) {
+            ComPtr<ABI::Windows::Foundation::IClosable> cl;
+            if (SUCCEEDED(pool.As(&cl)) && cl) cl->Close();
+        }
+        DestroyWindow(wgcWnd);
+    }
+
     if (testWnd) DestroyWindow(testWnd);
     UnregisterClassW(wc.lpszClassName, wc.hInstance);
     if (!affOk) {
         outReport = "SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE) failed.";
         return false;
     }
+    if (!wgcOk) {
+        outReport = wgcErr;
+        return false;
+    }
     rep << "[PASS] DirectComposition + WDA_EXCLUDEFROMCAPTURE verified\n";
+    rep << "[PASS] Windows Graphics Capture (OBS-Recordable Mode) verified\n";
 
     // 4. Execute dummy 256x256 GPU Compute + Pixel enhancement pass
     constexpr int W = 256, H = 256;

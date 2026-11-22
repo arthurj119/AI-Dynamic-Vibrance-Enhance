@@ -307,7 +307,7 @@ bool DetectActiveForegroundApp(
     std::wstring cls(classBuf);
     if (cls == L"Shell_TrayWnd" || cls == L"Shell_SecondaryTrayWnd" ||
         cls == L"Progman" || cls == L"WorkerW" || cls == L"Windows.UI.Core.CoreWindow") {
-        outInfo = { L"desktop", L"Desktop", false, L"Desktop" };
+        outInfo = { L"desktop", L"Desktop", false, L"Desktop", nullptr };
         return true;
     }
 
@@ -326,7 +326,7 @@ bool DetectActiveForegroundApp(
     if (exeLower == L"explorer.exe" || exeLower == L"searchhost.exe" ||
         exeLower == L"shellexperiencehost.exe" || exeLower == L"startmenuexperiencehost.exe" ||
         exeLower == L"lockapp.exe") {
-        outInfo = { L"desktop", L"Desktop", false, L"Desktop" };
+        outInfo = { L"desktop", L"Desktop", false, L"Desktop", nullptr };
         return true;
     }
 
@@ -359,6 +359,7 @@ bool DetectActiveForegroundApp(
     } else {
         outInfo.displayName = exePath.stem().wstring();
     }
+    outInfo.hwnd = hwnd;
     outInfo.isGame = ClassifyProcessAsGame(
         exePath, cls, isBorderlessFullscreen, outInfo.engineTag,
         customWhitelist, customBlacklist

@@ -51,6 +51,7 @@ target_link_libraries(AIDynamicVibranceEnhance PRIVATE
     psapi
     advapi32
     uuid
+    runtimeobject
 )
 
 # Keep standalone shaders synced automatically on every build
