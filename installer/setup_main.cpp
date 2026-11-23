@@ -244,7 +244,7 @@ bool RegisterUninstallEntry(const fs::path& installDir, const fs::path& exePath,
     std::wstring uninstCmd = L"\"" + exePath.wstring() + L"\" --uninstall";
 
     setStr(L"DisplayName", L"AI Dynamic Vibrance Enhance");
-    setStr(L"DisplayVersion", L"1.0.0");
+    setStr(L"DisplayVersion", L"2.0.0");
     setStr(L"Publisher", L"arthurj119");
     setStr(L"InstallLocation", installDir.wstring());
     setStr(L"DisplayIcon", iconLoc);
@@ -498,7 +498,7 @@ private:
         DrawSetupStarBadge(d2dFactory_.Get(), rt_.Get(), badgeR, brAccent_.Get(), brText_.Get());
 
         drawText(L"AI Dynamic Vibrance Enhance", fmtTitle_.Get(), D2D1::RectF(pad + 50, hdrY + 14, W - pad, hdrY + 38), brText_.Get());
-        drawText(L"v1.0.0  \u2022  by arthurj119  \u2022  Open-Source Cross-GPU Color & Visibility Enhancer",
+        drawText(L"v2.0.0  \u2022  by arthurj119  \u2022  Cross GPU Visual, True HDR, Scaling & Frame Gen Suite",
                  fmtSmall_.Get(), D2D1::RectF(pad + 50, hdrY + 39, W - pad, hdrY + 58), brTextMuted_.Get());
 
         float y = hdrY + 86.0f;

@@ -1,0 +1,82 @@
+name: Build Linux Gaming Packages
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  debian-ubuntu-pop-mint:
+    name: Ubuntu / Pop!_OS / Mint (.deb)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build & test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dpkg-dev python3 python3-tk
+      - name: Build .deb package
+        run: |
+          bash linux/packaging/debian/build-deb.sh
+          python3 linux/packaging/build-deb.py --verify
+          dpkg-deb --info linux/dist/ai-dynamic-vibrance-enhance_2.0.0_all.deb
+          dpkg-deb --contents linux/dist/ai-dynamic-vibrance-enhance_2.0.0_all.deb
+      - name: Install & run offline self-test
+        run: |
+          sudo apt-get install -y ./linux/dist/ai-dynamic-vibrance-enhance_2.0.0_all.deb
+          ai-dynamic-vibrance-enhance --self-test
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-deb-ubuntu-pop-mint
+          path: |
+            linux/dist/ai-dynamic-vibrance-enhance_*_all.deb
+            linux/dist/AIDynamicVibranceEnhance-Linux-v*.tar.gz
+
+  fedora-nobara:
+    name: Fedora / Nobara (.rpm)
+    runs-on: ubuntu-latest
+    container: fedora:41
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install rpm-build & Python deps
+        run: |
+          dnf install -y rpm-build python3 python3-tkinter tar gzip
+      - name: Build & verify RPM package
+        run: |
+          VERSION=2.0.0
+          mkdir -p ~/rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS} out-rpm
+          git archive --format=tar.gz --prefix="AI-Dynamic-Vibrance-Enhance-${VERSION}/" HEAD -o ~/rpmbuild/SOURCES/v${VERSION}.tar.gz || \
+            tar --transform="s,^\.,AI-Dynamic-Vibrance-Enhance-${VERSION}," -czf ~/rpmbuild/SOURCES/v${VERSION}.tar.gz .
+          cp linux/packaging/fedora/ai-dynamic-vibrance-enhance.spec ~/rpmbuild/SPECS/
+          rpmbuild -ba ~/rpmbuild/SPECS/ai-dynamic-vibrance-enhance.spec
+          cp ~/rpmbuild/RPMS/noarch/*.rpm out-rpm/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-rpm-fedora-nobara
+          path: out-rpm/*.rpm
+
+  arch-cachyos:
+    name: Arch / CachyOS / EndeavourOS (.pkg.tar.zst)
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install base-devel, python, tk
+        run: |
+          pacman -Syu --noconfirm --needed base-devel python tk tar gzip sudo
+      - name: Build & verify Arch package
+        run: |
+          VERSION=2.0.0
+          useradd -m builder || true
+          BUILD_ROOT=/tmp/archpkg
+          rm -rf "${BUILD_ROOT}" && mkdir -p "${BUILD_ROOT}" out-arch
+          tar --transform="s,^\.,AI-Dynamic-Vibrance-Enhance-${VERSION}," -czf "${BUILD_ROOT}/ai-dynamic-vibrance-enhance-${VERSION}.tar.gz" .
+          cp linux/packaging/arch/PKGBUILD linux/packaging/arch/ai-dynamic-vibrance-enhance.install "${BUILD_ROOT}/"
+          chown -R builder:builder "${BUILD_ROOT}"
+          su - builder -c "cd '${BUILD_ROOT}' && makepkg -s --noconfirm"
+          cp "${BUILD_ROOT}"/*.pkg.tar.zst out-arch/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-pkg-arch-cachyos
+          path: out-arch/*.pkg.tar.zst

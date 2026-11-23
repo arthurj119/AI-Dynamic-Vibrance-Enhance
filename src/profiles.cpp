@@ -2,6 +2,7 @@
 
 #include <psapi.h>
 #include <shellapi.h>
+#include <shlobj.h>
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -27,6 +28,74 @@ std::filesystem::path GetDefaultConfigPath() {
     return GetExeDirectory() / L"profiles.json";
 }
 
+std::filesystem::path GetScreenshotsDirectory() {
+    PWSTR picRaw = nullptr;
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Pictures, 0, nullptr, &picRaw)) && picRaw) {
+        std::filesystem::path dir = std::filesystem::path(picRaw) / L"AI Dynamic Vibrance Enhance";
+        CoTaskMemFree(picRaw);
+        return dir;
+    }
+    return GetExeDirectory() / L"Screenshots";
+}
+
+const wchar_t* GetCuratedPresetName(int presetIdx) {
+    switch (presetIdx) {
+        case 0:  return L"Balanced RTX";
+        case 1:  return L"Cinematic Film";
+        case 2:  return L"Competitive";
+        case 3:  return L"Vibrant RPG";
+        case 4:  return L"Night Comfort";
+        default: return L"Balanced RTX";
+    }
+}
+
+FilterParams BuildCuratedPreset(int presetIdx) {
+    FilterParams p{};
+    switch (presetIdx) {
+        case 0: // Balanced RTX
+            return p;
+        case 1: // Cinematic Film (AgX + Soft Bloom + AO + Deband)
+            p.intensity = 50;
+            p.saturationBoost = 50;
+            p.enableFilmic = true;
+            p.filmicMode = 1; // AgX
+            p.filmicStrength = 30;
+            p.enableBloom = true;
+            p.bloomIntensity = 20;
+            p.bloomThreshold = 68;
+            p.enableAmbientOcclusion = true;
+            p.ambientOcclusion = 30;
+            p.aoRadius = 50;
+            p.enableDeband = true;
+            p.debandStrength = 35;
+            return p;
+        case 2: // Competitive (Dark Visibility + Sharpen+)
+            p.intensity = 60;
+            p.saturationBoost = 60;
+            p.enableDarkLighting = true;
+            p.darkLighting = 35;
+            p.enableSharpen = true;
+            p.sharpen = 45;
+            return p;
+        case 3: // Vibrant RPG (Rich Color + Micro-Contrast + Deband)
+            p.intensity = 65;
+            p.saturationBoost = 70;
+            p.enableClarity = true;
+            p.clarity = 25;
+            p.enableDeband = true;
+            p.debandStrength = 45;
+            return p;
+        case 4: // Night Comfort (Relaxed Vibrance + Blue-Light Reduction)
+            p.intensity = 40;
+            p.saturationBoost = 35;
+            p.enableNightMode = true;
+            p.nightMode = 35;
+            return p;
+        default:
+            return p;
+    }
+}
+
 std::string WideToUtf8(const std::wstring& w) {
     if (w.empty()) return {};
     int len = WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()), nullptr, 0, nullptr, nullptr);
@@ -50,6 +119,21 @@ static std::wstring ToLowerW(std::wstring s) {
         ch = static_cast<wchar_t>(towlower(ch));
     }
     return s;
+}
+
+bool IsTransientCaptureProcess(const std::wstring& exeLower) {
+    static const std::unordered_set<std::wstring> kTransientCaptureProcs = {
+        L"screenclippinghost.exe",
+        L"snippingtool.exe",
+        L"sharex.exe",
+        L"lightshot.exe",
+        L"greenshot.exe",
+        L"gamebar.exe",
+        L"gamebarftserver.exe",
+        L"amddvr.exe",
+        L"nvidia share.exe"
+    };
+    return kTransientCaptureProcs.find(NormalizeExeFilename(exeLower)) != kTransientCaptureProcs.end();
 }
 
 std::wstring NormalizeExeFilename(const std::wstring& pathOrName) {
@@ -322,6 +406,10 @@ bool DetectActiveForegroundApp(
 
     std::filesystem::path exePath(pathBuf);
     std::wstring exeLower = ToLowerW(exePath.filename().wstring());
+
+    if (IsTransientCaptureProcess(exeLower)) {
+        return false; // Preserve current targetHwnd and WGC/overlay state during screenshots
+    }
 
     if (exeLower == L"explorer.exe" || exeLower == L"searchhost.exe" ||
         exeLower == L"shellexperiencehost.exe" || exeLower == L"startmenuexperiencehost.exe" ||
@@ -598,6 +686,8 @@ void WriteParams(std::ostringstream& ss, const FilterParams& p, const char* inde
     ss << indent << "  \"darkLighting\": " << p.darkLighting << ",\n";
     ss << indent << "  \"clarity\": " << p.clarity << ",\n";
     ss << indent << "  \"dynamicHdr\": " << p.dynamicHdr << ",\n";
+    ss << indent << "  \"hdrPeakNits\": " << p.hdrPeakNits << ",\n";
+    ss << indent << "  \"hdrMidGray\": " << p.hdrMidGray << ",\n";
     ss << indent << "  \"brightness\": " << p.brightness << ",\n";
     ss << indent << "  \"contrast\": " << p.contrast << ",\n";
     ss << indent << "  \"sharpen\": " << p.sharpen << ",\n";
@@ -610,8 +700,16 @@ void WriteParams(std::ostringstream& ss, const FilterParams& p, const char* inde
     ss << indent << "  \"vignette\": " << p.vignette << ",\n";
     ss << indent << "  \"colorblindStrength\": " << p.colorblindStrength << ",\n";
     ss << indent << "  \"colorblindType\": " << p.colorblindType << ",\n";
+    ss << indent << "  \"ambientOcclusion\": " << p.ambientOcclusion << ",\n";
+    ss << indent << "  \"aoRadius\": " << p.aoRadius << ",\n";
+    ss << indent << "  \"bloomIntensity\": " << p.bloomIntensity << ",\n";
+    ss << indent << "  \"bloomThreshold\": " << p.bloomThreshold << ",\n";
+    ss << indent << "  \"filmicStrength\": " << p.filmicStrength << ",\n";
+    ss << indent << "  \"filmicMode\": " << p.filmicMode << ",\n";
+    ss << indent << "  \"debandStrength\": " << p.debandStrength << ",\n";
     ss << indent << "  \"enableDynamicVibrance\": " << (p.enableDynamicVibrance ? "true" : "false") << ",\n";
     ss << indent << "  \"enableDarkLighting\": " << (p.enableDarkLighting ? "true" : "false") << ",\n";
+    ss << indent << "  \"enableAmbientOcclusion\": " << (p.enableAmbientOcclusion ? "true" : "false") << ",\n";
     ss << indent << "  \"enableClarity\": " << (p.enableClarity ? "true" : "false") << ",\n";
     ss << indent << "  \"enableDynamicHdr\": " << (p.enableDynamicHdr ? "true" : "false") << ",\n";
     ss << indent << "  \"enableBrightnessContrast\": " << (p.enableBrightnessContrast ? "true" : "false") << ",\n";
@@ -621,7 +719,10 @@ void WriteParams(std::ostringstream& ss, const FilterParams& p, const char* inde
     ss << indent << "  \"enableNightMode\": " << (p.enableNightMode ? "true" : "false") << ",\n";
     ss << indent << "  \"enableBlackAndWhite\": " << (p.enableBlackAndWhite ? "true" : "false") << ",\n";
     ss << indent << "  \"enableVignette\": " << (p.enableVignette ? "true" : "false") << ",\n";
-    ss << indent << "  \"enableColorblind\": " << (p.enableColorblind ? "true" : "false") << "\n";
+    ss << indent << "  \"enableColorblind\": " << (p.enableColorblind ? "true" : "false") << ",\n";
+    ss << indent << "  \"enableBloom\": " << (p.enableBloom ? "true" : "false") << ",\n";
+    ss << indent << "  \"enableFilmic\": " << (p.enableFilmic ? "true" : "false") << ",\n";
+    ss << indent << "  \"enableDeband\": " << (p.enableDeband ? "true" : "false") << "\n";
     ss << indent << "}";
 }
 
@@ -633,6 +734,8 @@ void ReadParams(const JsonValue& v, FilterParams& p) {
     if (auto* x = v.Get("darkLighting")) p.darkLighting = clamp100(x->AsInt(p.darkLighting));
     if (auto* x = v.Get("clarity")) p.clarity = clamp100(x->AsInt(p.clarity));
     if (auto* x = v.Get("dynamicHdr")) p.dynamicHdr = clamp100(x->AsInt(p.dynamicHdr));
+    if (auto* x = v.Get("hdrPeakNits")) p.hdrPeakNits = std::clamp(x->AsInt(p.hdrPeakNits), 300, 1500);
+    if (auto* x = v.Get("hdrMidGray")) p.hdrMidGray = clamp100(x->AsInt(p.hdrMidGray));
     if (auto* x = v.Get("brightness")) p.brightness = clamp100(x->AsInt(p.brightness));
     if (auto* x = v.Get("contrast")) p.contrast = clamp100(x->AsInt(p.contrast));
     if (auto* x = v.Get("sharpen")) p.sharpen = clamp100(x->AsInt(p.sharpen));
@@ -645,10 +748,18 @@ void ReadParams(const JsonValue& v, FilterParams& p) {
     if (auto* x = v.Get("vignette")) p.vignette = clamp100(x->AsInt(p.vignette));
     if (auto* x = v.Get("colorblindStrength")) p.colorblindStrength = clamp100(x->AsInt(p.colorblindStrength));
     if (auto* x = v.Get("colorblindType")) p.colorblindType = std::clamp(x->AsInt(p.colorblindType), 0, 2);
+    if (auto* x = v.Get("ambientOcclusion")) p.ambientOcclusion = clamp100(x->AsInt(p.ambientOcclusion));
+    if (auto* x = v.Get("aoRadius")) p.aoRadius = clamp100(x->AsInt(p.aoRadius));
+    if (auto* x = v.Get("bloomIntensity")) p.bloomIntensity = clamp100(x->AsInt(p.bloomIntensity));
+    if (auto* x = v.Get("bloomThreshold")) p.bloomThreshold = clamp100(x->AsInt(p.bloomThreshold));
+    if (auto* x = v.Get("filmicStrength")) p.filmicStrength = clamp100(x->AsInt(p.filmicStrength));
+    if (auto* x = v.Get("filmicMode")) p.filmicMode = std::clamp(x->AsInt(p.filmicMode), 0, 2);
+    if (auto* x = v.Get("debandStrength")) p.debandStrength = clamp100(x->AsInt(p.debandStrength));
     p.skinProtection = true;
     p.adaptiveScene = true;
     if (auto* x = v.Get("enableDynamicVibrance")) p.enableDynamicVibrance = x->AsBool(p.enableDynamicVibrance);
     if (auto* x = v.Get("enableDarkLighting")) p.enableDarkLighting = x->AsBool(p.enableDarkLighting);
+    if (auto* x = v.Get("enableAmbientOcclusion")) p.enableAmbientOcclusion = x->AsBool(p.enableAmbientOcclusion);
     if (auto* x = v.Get("enableClarity")) p.enableClarity = x->AsBool(p.enableClarity);
     if (auto* x = v.Get("enableDynamicHdr")) p.enableDynamicHdr = x->AsBool(p.enableDynamicHdr);
     if (auto* x = v.Get("enableBrightnessContrast")) p.enableBrightnessContrast = x->AsBool(p.enableBrightnessContrast);
@@ -659,6 +770,9 @@ void ReadParams(const JsonValue& v, FilterParams& p) {
     if (auto* x = v.Get("enableBlackAndWhite")) p.enableBlackAndWhite = x->AsBool(p.enableBlackAndWhite);
     if (auto* x = v.Get("enableVignette")) p.enableVignette = x->AsBool(p.enableVignette);
     if (auto* x = v.Get("enableColorblind")) p.enableColorblind = x->AsBool(p.enableColorblind);
+    if (auto* x = v.Get("enableBloom")) p.enableBloom = x->AsBool(p.enableBloom);
+    if (auto* x = v.Get("enableFilmic")) p.enableFilmic = x->AsBool(p.enableFilmic);
+    if (auto* x = v.Get("enableDeband")) p.enableDeband = x->AsBool(p.enableDeband);
 }
 
 } // namespace
@@ -691,8 +805,20 @@ bool SaveConfig(const AppConfig& cfg, const std::filesystem::path& path) {
     ss << "  \"quickToggleEnabled\": " << (cfg.quickToggleEnabled ? "true" : "false") << ",\n";
     ss << "  \"quickToggleMods\": " << cfg.quickToggleMods << ",\n";
     ss << "  \"quickToggleVk\": " << cfg.quickToggleVk << ",\n";
+    ss << "  \"screenshotHotkeyMods\": " << cfg.screenshotHotkeyMods << ",\n";
+    ss << "  \"screenshotHotkeyVk\": " << cfg.screenshotHotkeyVk << ",\n";
     ss << "  \"mode2ExportProfile\": " << std::clamp(cfg.mode2ExportProfile, 1, 3) << ",\n";
     ss << "  \"reshadeFolder\": \"" << EscapeJson(WideToUtf8(cfg.reshadeFolder)) << "\",\n";
+    ss << "  \"scaleMode\": " << std::clamp(cfg.scaleMode, 0, 4) << ",\n";
+    ss << "  \"scaleSharpness\": " << std::clamp(cfg.scaleSharpness, 0, 100) << ",\n";
+    ss << "  \"scaleFullscreenStretch\": " << (cfg.scaleFullscreenStretch ? "true" : "false") << ",\n";
+    ss << "  \"fgMode\": " << std::clamp(cfg.fgMode, 0, 4) << ",\n";
+    ss << "  \"fgFlowScale\": " << std::clamp(cfg.fgFlowScale, 25, 100) << ",\n";
+    ss << "  \"fgAdaptiveTargetFps\": " << std::clamp(cfg.fgAdaptiveTargetFps, 60, 240) << ",\n";
+    ss << "  \"fgFastMotionFallback\": " << (cfg.fgFastMotionFallback ? "true" : "false") << ",\n";
+    ss << "  \"fgStaticHudProtect\": " << (cfg.fgStaticHudProtect ? "true" : "false") << ",\n";
+    ss << "  \"captureApi\": " << std::clamp(cfg.captureApi, 0, 1) << ",\n";
+    ss << "  \"allowTearing\": " << (cfg.allowTearing ? "true" : "false") << ",\n";
     ss << "  \"profiles\": [\n";
     for (int i = 0; i < 3; ++i) {
         ss << "    ";
@@ -739,7 +865,7 @@ bool LoadConfig(AppConfig& cfg, const std::filesystem::path& path) {
     if (auto* x = root.Get("launchAtStartup")) cfg.launchAtStartup = x->AsBool(cfg.launchAtStartup);
     if (auto* x = root.Get("mode2Enabled")) cfg.mode2Enabled = x->AsBool(cfg.mode2Enabled);
     if (auto* x = root.Get("splitPreview")) cfg.splitPreview = x->AsBool(cfg.splitPreview);
-    if (auto* x = root.Get("splitPosition")) cfg.splitPosition = std::clamp(x->AsFloat(cfg.splitPosition), 0.1f, 0.9f);
+    if (auto* x = root.Get("splitPosition")) cfg.splitPosition = std::clamp(x->AsFloat(cfg.splitPosition), 0.05f, 0.95f);
     if (auto* x = root.Get("hubListView")) cfg.hubListView = x->AsBool(cfg.hubListView);
     if (auto* x = root.Get("hideSidebarFromCapture")) cfg.hideSidebarFromCapture = x->AsBool(cfg.hideSidebarFromCapture);
     if (auto* x = root.Get("sidebarHotkeyMods")) cfg.sidebarHotkeyMods = static_cast<uint32_t>(std::max(0, x->AsInt(static_cast<int>(cfg.sidebarHotkeyMods))));
@@ -761,8 +887,27 @@ bool LoadConfig(AppConfig& cfg, const std::filesystem::path& path) {
         cfg.quickToggleMods = MOD_ALT;
         cfg.quickToggleVk = 'V';
     }
+    if (auto* x = root.Get("screenshotHotkeyMods")) cfg.screenshotHotkeyMods = static_cast<uint32_t>(std::max(0, x->AsInt(static_cast<int>(cfg.screenshotHotkeyMods))));
+    if (auto* x = root.Get("screenshotHotkeyVk")) {
+        int vk = x->AsInt(static_cast<int>(cfg.screenshotHotkeyVk));
+        cfg.screenshotHotkeyVk = (vk > 0 && vk < 256) ? static_cast<uint32_t>(vk) : 0x7Bu;
+    }
+    if (cfg.screenshotHotkeyVk == 0) {
+        cfg.screenshotHotkeyMods = MOD_ALT;
+        cfg.screenshotHotkeyVk = VK_F12;
+    }
     if (auto* x = root.Get("mode2ExportProfile")) cfg.mode2ExportProfile = std::clamp(x->AsInt(cfg.mode2ExportProfile), 1, 3);
     if (auto* x = root.Get("reshadeFolder")) cfg.reshadeFolder = Utf8ToWide(x->AsString());
+    if (auto* x = root.Get("scaleMode")) cfg.scaleMode = std::clamp(x->AsInt(cfg.scaleMode), 0, 4);
+    if (auto* x = root.Get("scaleSharpness")) cfg.scaleSharpness = std::clamp(x->AsInt(cfg.scaleSharpness), 0, 100);
+    if (auto* x = root.Get("scaleFullscreenStretch")) cfg.scaleFullscreenStretch = x->AsBool(cfg.scaleFullscreenStretch);
+    if (auto* x = root.Get("fgMode")) cfg.fgMode = std::clamp(x->AsInt(cfg.fgMode), 0, 4);
+    if (auto* x = root.Get("fgFlowScale")) cfg.fgFlowScale = std::clamp(x->AsInt(cfg.fgFlowScale), 25, 100);
+    if (auto* x = root.Get("fgAdaptiveTargetFps")) cfg.fgAdaptiveTargetFps = std::clamp(x->AsInt(cfg.fgAdaptiveTargetFps), 60, 240);
+    if (auto* x = root.Get("fgFastMotionFallback")) cfg.fgFastMotionFallback = x->AsBool(cfg.fgFastMotionFallback);
+    if (auto* x = root.Get("fgStaticHudProtect")) cfg.fgStaticHudProtect = x->AsBool(cfg.fgStaticHudProtect);
+    if (auto* x = root.Get("captureApi")) cfg.captureApi = std::clamp(x->AsInt(cfg.captureApi), 0, 1);
+    if (auto* x = root.Get("allowTearing")) cfg.allowTearing = x->AsBool(cfg.allowTearing);
     if (loadedVersion >= 2) {
         cfg.schemaVersion = 3;
         if (auto* arr = root.Get("profiles")) {

@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#141821"/>
+      <stop offset="100%" stop-color="#0B0D12"/>
+    </linearGradient>
+    <linearGradient id="crimsonGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FF4B5C"/>
+      <stop offset="100%" stop-color="#C81E31"/>
+    </linearGradient>
+    <linearGradient id="prismGrad" x1="0%" y1="100%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#E02B3D"/>
+      <stop offset="50%" stop-color="#FF7A59"/>
+      <stop offset="100%" stop-color="#FFD166"/>
+    </linearGradient>
+  </defs>
+  <rect x="12" y="12" width="232" height="232" rx="48" fill="url(#bgGrad)" stroke="#252A38" stroke-width="6"/>
+  <path d="M128 42 L208 128 L128 214 L48 128 Z" fill="none" stroke="url(#crimsonGrad)" stroke-width="10" stroke-linejoin="round"/>
+  <path d="M128 66 L184 128 L128 190 L72 128 Z" fill="url(#prismGrad)" opacity="0.22"/>
+  <path d="M128 68 L178 128 L128 188 L78 128 Z" fill="none" stroke="url(#prismGrad)" stroke-width="5" stroke-linejoin="round"/>
+  <circle cx="128" cy="128" r="24" fill="url(#crimsonGrad)"/>
+  <circle cx="128" cy="128" r="10" fill="#0E1015"/>
+  <circle cx="122" cy="122" r="4" fill="#FFFFFF" opacity="0.85"/>
+</svg>

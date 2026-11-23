@@ -52,6 +52,8 @@ target_link_libraries(AIDynamicVibranceEnhance PRIVATE
     advapi32
     uuid
     runtimeobject
+    winmm
+    windowscodecs
 )
 
 # Keep standalone shaders synced automatically on every build
@@ -61,7 +63,7 @@ set(EXPORTED_FX   "${CMAKE_CURRENT_SOURCE_DIR}/shaders/AIDynamicVibranceEnhance.
 add_custom_command(
     OUTPUT "${EXPORTED_HLSL}" "${EXPORTED_FX}"
     COMMAND $<TARGET_FILE:AIDynamicVibranceEnhance> --export-shaders "${CMAKE_CURRENT_SOURCE_DIR}/shaders"
-    DEPENDS AIDynamicVibranceEnhance "${CMAKE_CURRENT_SOURCE_DIR}/src/shader_source.h"
+    DEPENDS AIDynamicVibranceEnhance "${CMAKE_CURRENT_SOURCE_DIR}/src/shader_source.h" "${CMAKE_CURRENT_SOURCE_DIR}/src/scaling_fg_shaders.h"
     COMMENT "Exporting standalone HLSL and ReShade shaders"
     VERBATIM
 )

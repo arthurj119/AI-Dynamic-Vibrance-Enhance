@@ -1,0 +1,51 @@
+pkgname=ai-dynamic-vibrance-enhance
+pkgver=2.0.0
+pkgrel=1
+pkgdesc='Real-time visual enhancer, 16-filter shader & vkBasalt Control Hub for Linux gaming'
+arch=('any')
+url='https://github.com/arthurj119/AI-Dynamic-Vibrance-Enhance'
+license=('MIT')
+depends=('python' 'tk')
+optdepends=(
+  'vkbasalt: Vulkan post-processing layer required to apply shaders in-game'
+  'lib32-vkbasalt: 32-bit Vulkan post-processing support for older Proton/Wine games'
+  'wl-clipboard: Wayland clipboard support for copying Steam launch options'
+  'xclip: X11 clipboard support for copying Steam launch options'
+)
+install="${pkgname}.install"
+source=("${pkgname}-${pkgver}.tar.gz::https://github.com/arthurj119/AI-Dynamic-Vibrance-Enhance/archive/refs/tags/v${pkgver}.tar.gz")
+sha256sums=('SKIP')
+
+_find_src_root() {
+  if [[ -d "${srcdir}/AI-Dynamic-Vibrance-Enhance-${pkgver}" ]]; then
+    printf '%s\n' "${srcdir}/AI-Dynamic-Vibrance-Enhance-${pkgver}"
+  elif [[ -d "${srcdir}/AIDynamicVibranceEnhance-Linux-v${pkgver}" ]]; then
+    printf '%s\n' "${srcdir}/AIDynamicVibranceEnhance-Linux-v${pkgver}"
+  else
+    printf '%s\n' "${srcdir}"
+  fi
+}
+
+check() {
+  local root
+  root="$(_find_src_root)"
+  local hub="${root}/linux/adv_control_hub.py"
+  [[ -f "${hub}" ]] || hub="${root}/adv_control_hub.py"
+  python3 "${hub}" --self-test
+}
+
+package() {
+  local root
+  root="$(_find_src_root)"
+  local ldir="${root}/linux"
+  [[ -d "${ldir}" ]] || ldir="${root}"
+  local fx="${root}/shaders/AIDynamicVibranceEnhance.fx"
+  [[ -f "${fx}" ]] || fx="${ldir}/shaders/AIDynamicVibranceEnhance.fx"
+
+  install -Dm755 "${ldir}/adv_control_hub.py" "${pkgdir}/usr/bin/${pkgname}"
+  install -Dm644 "${fx}" "${pkgdir}/usr/share/${pkgname}/shaders/AIDynamicVibranceEnhance.fx"
+  install -Dm644 "${ldir}/shaders/ReShade.fxh" "${pkgdir}/usr/share/${pkgname}/shaders/ReShade.fxh"
+  install -Dm644 "${ldir}/assets/${pkgname}.desktop" "${pkgdir}/usr/share/applications/${pkgname}.desktop"
+  install -Dm644 "${ldir}/assets/${pkgname}.svg" "${pkgdir}/usr/share/icons/hicolor/scalable/apps/${pkgname}.svg"
+  install -Dm644 "${root}/LICENSE" "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+}

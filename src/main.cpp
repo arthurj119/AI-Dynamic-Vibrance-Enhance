@@ -24,12 +24,17 @@ constexpr UINT WM_TRAYICON = WM_APP + 1;
 constexpr UINT WM_APP_SHOW_HUB = WM_APP + 2;
 constexpr int HOTKEY_TOGGLE_ID = 1;
 constexpr int HOTKEY_QUICK_TOGGLE_ID = 2;
+constexpr int HOTKEY_SCREENSHOT_ID = 3;
+constexpr int HOTKEY_SPLIT_TOGGLE_ID = 4;
+constexpr int HOTKEY_SPLIT_DEC_ID = 5;
+constexpr int HOTKEY_SPLIT_INC_ID = 6;
 constexpr UINT TRAY_ICON_ID = 1001;
 
 enum TrayMenuCmd {
     CMD_SHOW_HUB = 2000,
     CMD_TOGGLE_SIDEBAR = 2001,
     CMD_TOGGLE_OVERLAY_MASTER = 2002,
+    CMD_SCREENSHOT = 2003,
     CMD_PROFILE_0 = 2010,
     CMD_PROFILE_1 = 2011,
     CMD_PROFILE_2 = 2012,
@@ -151,11 +156,37 @@ int RunFullSelfTest() {
     c1.quickToggleEnabled = true;
     c1.quickToggleMods = MOD_ALT;
     c1.quickToggleVk = 'Q';
+    c1.screenshotHotkeyMods = MOD_CONTROL | MOD_ALT;
+    c1.screenshotHotkeyVk = VK_F11;
     c1.mode2ExportProfile = 3;
     c1.reshadeFolder = L"F:\\Games\\OldTitle\\reshade-shaders\\Shaders";
+    c1.scaleMode = SCALE_FSR1;
+    c1.scaleSharpness = 72;
+    c1.scaleFullscreenStretch = false;
+    c1.fgMode = FG_ADAPTIVE;
+    c1.fgFlowScale = 75;
+    c1.fgAdaptiveTargetFps = 165;
+    c1.fgFastMotionFallback = false;
+    c1.fgStaticHudProtect = true;
+    c1.captureApi = CAPTURE_WGC;
+    c1.allowTearing = false;
     c1.customGameWhitelist = { L"pcsx2-qt.exe", L"myindie.exe" };
     c1.customGameBlacklist = { L"blender.exe" };
     c1.profiles[1].darkLighting = 82;
+    c1.profiles[1].ambientOcclusion = 68;
+    c1.profiles[1].aoRadius = 64;
+    c1.profiles[1].enableAmbientOcclusion = true;
+    c1.profiles[1].bloomIntensity = 65;
+    c1.profiles[1].bloomThreshold = 70;
+    c1.profiles[1].enableBloom = true;
+    c1.profiles[1].filmicMode = 1;
+    c1.profiles[1].filmicStrength = 60;
+    c1.profiles[1].enableFilmic = true;
+    c1.profiles[1].debandStrength = 55;
+    c1.profiles[1].enableDeband = true;
+    c1.profiles[1].dynamicHdr = 75;
+    c1.profiles[1].hdrPeakNits = 1100;
+    c1.profiles[1].hdrMidGray = 62;
     c1.profiles[1].brightness = 47;
     c1.profiles[1].sharpen = 74;
     c1.profiles[1].enableSharpen = true;
@@ -187,13 +218,39 @@ int RunFullSelfTest() {
         c2.quickToggleEnabled != true ||
         c2.quickToggleMods != MOD_ALT ||
         c2.quickToggleVk != 'Q' ||
+        c2.screenshotHotkeyMods != (MOD_CONTROL | MOD_ALT) ||
+        c2.screenshotHotkeyVk != VK_F11 ||
         c2.mode2ExportProfile != 3 ||
         c2.reshadeFolder != c1.reshadeFolder ||
+        c2.scaleMode != SCALE_FSR1 ||
+        c2.scaleSharpness != 72 ||
+        c2.scaleFullscreenStretch != false ||
+        c2.fgMode != FG_ADAPTIVE ||
+        c2.fgFlowScale != 75 ||
+        c2.fgAdaptiveTargetFps != 165 ||
+        c2.fgFastMotionFallback != false ||
+        c2.fgStaticHudProtect != true ||
+        c2.captureApi != CAPTURE_WGC ||
+        c2.allowTearing != false ||
         c2.customGameWhitelist.size() != 2 ||
         c2.customGameWhitelist[0] != L"pcsx2-qt.exe" ||
         c2.customGameBlacklist.size() != 1 ||
         c2.customGameBlacklist[0] != L"blender.exe" ||
         c2.profiles[1].darkLighting != 82 ||
+        c2.profiles[1].ambientOcclusion != 68 ||
+        c2.profiles[1].aoRadius != 64 ||
+        c2.profiles[1].enableAmbientOcclusion != true ||
+        c2.profiles[1].bloomIntensity != 65 ||
+        c2.profiles[1].bloomThreshold != 70 ||
+        c2.profiles[1].enableBloom != true ||
+        c2.profiles[1].filmicMode != 1 ||
+        c2.profiles[1].filmicStrength != 60 ||
+        c2.profiles[1].enableFilmic != true ||
+        c2.profiles[1].debandStrength != 55 ||
+        c2.profiles[1].enableDeband != true ||
+        c2.profiles[1].dynamicHdr != 75 ||
+        c2.profiles[1].hdrPeakNits != 1100 ||
+        c2.profiles[1].hdrMidGray != 62 ||
         c2.profiles[1].brightness != 47 ||
         c2.profiles[1].sharpen != 74 ||
         c2.profiles[1].enableSharpen != true ||
@@ -222,13 +279,32 @@ int RunFullSelfTest() {
     if (!ExportPresetFile(c1.profiles[1], L"Cinematic Test", presetPath) ||
         !ImportPresetFile(impFp, impName, presetPath) ||
         impName != L"Cinematic Test" ||
-        impFp.sharpen != 74 || !impFp.enableSharpen || impFp.colorblindType != 2) {
+        impFp.sharpen != 74 || !impFp.enableSharpen || impFp.colorblindType != 2 ||
+        impFp.hdrPeakNits != 1100 || impFp.hdrMidGray != 62) {
         out << "[FAIL] Community preset export/import failed.\n";
         WriteStdout(out.str());
         fs::remove_all(tempBase, ec);
         return 1;
     }
-    out << "[PASS] Custom hotkey formatter & community .json preset round-trip verified\n";
+    {
+        FilterParams p0 = BuildCuratedPreset(0);
+        FilterParams p1 = BuildCuratedPreset(1);
+        FilterParams p2 = BuildCuratedPreset(2);
+        FilterParams p3 = BuildCuratedPreset(3);
+        FilterParams p4 = BuildCuratedPreset(4);
+        if (std::wstring(GetCuratedPresetName(1)) != L"Cinematic Film" ||
+            p0.intensity != 50 || p0.enableFilmic ||
+            !p1.enableFilmic || p1.filmicMode != 1 || !p1.enableBloom || !p1.enableAmbientOcclusion || !p1.enableDeband ||
+            !p2.enableDarkLighting || !p2.enableSharpen ||
+            !p3.enableClarity || !p3.enableDeband ||
+            !p4.enableNightMode) {
+            out << "[FAIL] Built-in curated starter presets assertion failed.\n";
+            WriteStdout(out.str());
+            fs::remove_all(tempBase, ec);
+            return 1;
+        }
+    }
+    out << "[PASS] Custom hotkey formatter, 5 starter presets & .json round-trip verified\n";
 
     // 2C. Game-Only auto-detector + custom whitelist/blacklist override check
     std::wstring tagBrowser, tagWitcher, tagUnreal, tagCustomWl, tagCustomBl;
@@ -238,7 +314,10 @@ int RunFullSelfTest() {
     bool detCustomWl = ClassifyProcessAsGame(L"D:\\Emulators\\pcsx2-qt.exe", L"Qt6QWindowIcon", false, tagCustomWl, &c2.customGameWhitelist, &c2.customGameBlacklist);
     bool detCustomBl = ClassifyProcessAsGame(L"C:\\Games\\blender.exe", L"GHOST_WindowClass", true, tagCustomBl, &c2.customGameWhitelist, &c2.customGameBlacklist);
     if (detBrowser || !detWitcher || !detUnreal || !detCustomWl || detCustomBl ||
-        tagCustomWl != L"Custom Game" || tagCustomBl != L"Ignored (User)") {
+        tagCustomWl != L"Custom Game" || tagCustomBl != L"Ignored (User)" ||
+        !IsTransientCaptureProcess(L"screenclippinghost.exe") ||
+        !IsTransientCaptureProcess(L"SnippingTool.exe") ||
+        IsTransientCaptureProcess(L"witcher3.exe")) {
         out << "[FAIL] Game-Only / override classifier assertion failed.\n";
         WriteStdout(out.str());
         fs::remove_all(tempBase, ec);
@@ -375,6 +454,10 @@ struct AppState {
     bool quickHotkeyRegistered = false;
     uint32_t regQuickMods = 0;
     uint32_t regQuickVk = 0;
+    bool screenshotHotkeyRegistered = false;
+    uint32_t regShotMods = 0;
+    uint32_t regShotVk = 0;
+    bool splitHotkeysRegistered = false;
     bool hotkeysSuspended = false;
     bool paramsDirty = true;
     bool configDirty = false;
@@ -386,7 +469,26 @@ struct AppState {
     bool exclusiveFullscreen = false;
     ULONGLONG gameEnteredMs = 0;
     int lastNonZeroProfile = 1;
+    bool lastTelActive = false;
+    bool lastTelWgc = false;
 };
+
+std::wstring BuildScreenshotFilePath() {
+    std::filesystem::path baseDir = GetScreenshotsDirectory();
+    SYSTEMTIME st{};
+    GetLocalTime(&st);
+    wchar_t nameBuf[64] = {};
+    swprintf_s(
+        nameBuf,
+        L"ADV_%04u%02u%02u_%02u%02u%02u_%03u.png",
+        st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds
+    );
+    return (baseDir / nameBuf).wstring();
+}
+
+void TriggerFilteredScreenshot(AppState& state) {
+    state.overlay.RequestScreenshot(BuildScreenshotFilePath());
+}
 
 void SyncSingleHotkey(
     HWND trayHwnd,
@@ -436,6 +538,26 @@ void SyncOverlayAndHotkey(AppState& state) {
         state.quickHotkeyRegistered, state.regQuickMods, state.regQuickVk
     );
 
+    bool wantShot = state.config.overlayEnabled && !state.hotkeysSuspended && state.config.screenshotHotkeyVk != 0;
+    SyncSingleHotkey(
+        state.trayHwnd, HOTKEY_SCREENSHOT_ID, wantShot,
+        state.config.screenshotHotkeyMods, state.config.screenshotHotkeyVk,
+        state.screenshotHotkeyRegistered, state.regShotMods, state.regShotVk
+    );
+
+    bool wantSplitHotkeys = state.config.overlayEnabled && !state.hotkeysSuspended;
+    if (state.splitHotkeysRegistered && !wantSplitHotkeys && state.trayHwnd) {
+        UnregisterHotKey(state.trayHwnd, HOTKEY_SPLIT_TOGGLE_ID);
+        UnregisterHotKey(state.trayHwnd, HOTKEY_SPLIT_DEC_ID);
+        UnregisterHotKey(state.trayHwnd, HOTKEY_SPLIT_INC_ID);
+        state.splitHotkeysRegistered = false;
+    } else if (!state.splitHotkeysRegistered && wantSplitHotkeys && state.trayHwnd) {
+        RegisterHotKey(state.trayHwnd, HOTKEY_SPLIT_TOGGLE_ID, MOD_ALT | MOD_NOREPEAT, VK_OEM_5);
+        RegisterHotKey(state.trayHwnd, HOTKEY_SPLIT_DEC_ID, MOD_ALT, VK_OEM_4);
+        RegisterHotKey(state.trayHwnd, HOTKEY_SPLIT_INC_ID, MOD_ALT, VK_OEM_6);
+        state.splitHotkeysRegistered = true;
+    }
+
     if (state.trayAdded && state.trayHwnd) {
         std::wstring tip = L"AI Dynamic Vibrance Enhance (" +
                            FormatHotkeyString(state.config.sidebarHotkeyMods, state.config.sidebarHotkeyVk) + L")";
@@ -456,7 +578,10 @@ void SyncOverlayAndHotkey(AppState& state) {
             state.sidebar.SetOpen(false);
         }
         bool allow = (!state.config.onlyInGames || state.currentAppIsGame) && !isFse;
-        state.overlay.SetActive((state.config.activeProfile != 0) && allow,
+        bool anyEngineFeature = (state.config.activeProfile != 0) ||
+                                (state.config.scaleMode != SCALE_OFF) ||
+                                (state.config.fgMode != FG_OFF);
+        state.overlay.SetActive(anyEngineFeature && allow,
                                isFse ? nullptr : state.sidebar.Hwnd(),
                                state.currentAppHwnd);
     } else {
@@ -467,6 +592,21 @@ void SyncOverlayAndHotkey(AppState& state) {
     }
 }
 
+void PushOverlayRenderState(AppState& state, bool forceRedraw) {
+    FilterParams bypassFp{};
+    bypassFp.enableDynamicVibrance = false;
+    const FilterParams& activeFp = (state.config.activeProfile >= 1 && state.config.activeProfile <= 3)
+        ? state.config.profiles[state.config.activeProfile - 1]
+        : bypassFp;
+    state.overlay.UpdateRenderState(
+        activeFp,
+        state.config.splitPreview,
+        state.config.splitPosition,
+        forceRedraw,
+        state.config
+    );
+}
+
 void ShowTrayMenu(AppState* state) {
     HMENU menu = CreatePopupMenu();
     std::wstring hkStr = FormatHotkeyString(state->config.sidebarHotkeyMods, state->config.sidebarHotkeyVk);
@@ -474,6 +614,9 @@ void ShowTrayMenu(AppState* state) {
     UINT sbFlags = MF_STRING | (state->config.overlayEnabled ? 0 : MF_GRAYED);
     std::wstring toggleLabel = (state->sidebar.IsOpen() ? L"Close Filter Sidebar (" : L"Open Filter Sidebar (") + hkStr + L")";
     AppendMenuW(menu, sbFlags, CMD_TOGGLE_SIDEBAR, toggleLabel.c_str());
+    std::wstring shotLabel = L"Save Filtered Screenshot (" +
+        FormatHotkeyString(state->config.screenshotHotkeyMods, state->config.screenshotHotkeyVk) + L")";
+    AppendMenuW(menu, MF_STRING, CMD_SCREENSHOT, shotLabel.c_str());
     std::wstring masterLabel = L"In-Game Overlay (" + hkStr + L")";
     AppendMenuW(menu, MF_STRING | (state->config.overlayEnabled ? MF_CHECKED : 0),
                 CMD_TOGGLE_OVERLAY_MASTER, masterLabel.c_str());
@@ -515,6 +658,9 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                     SyncOverlayAndHotkey(*state);
                     return 0;
                 }
+                if (!state->sidebar.IsOpen()) {
+                    state->overlay.RequestHdrRefresh();
+                }
                 state->sidebar.Toggle();
             } else if (wParam == HOTKEY_QUICK_TOGGLE_ID &&
                        state->config.overlayEnabled && state->config.quickToggleEnabled) {
@@ -533,7 +679,25 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                     state->config.perAppProfile[state->currentAppExe] = state->config.activeProfile;
                 }
                 SyncOverlayAndHotkey(*state);
-                state->paramsDirty = true;
+                PushOverlayRenderState(*state, true);
+                state->configDirty = true;
+                state->lastConfigEditMs = GetTickCount64();
+                state->controlHub.Invalidate();
+                state->sidebar.Invalidate();
+            } else if (wParam == HOTKEY_SCREENSHOT_ID && state->config.overlayEnabled) {
+                TriggerFilteredScreenshot(*state);
+            } else if (wParam == HOTKEY_SPLIT_TOGGLE_ID && state->config.overlayEnabled) {
+                state->config.splitPreview = !state->config.splitPreview;
+                PushOverlayRenderState(*state, true);
+                state->configDirty = true;
+                state->lastConfigEditMs = GetTickCount64();
+                state->controlHub.Invalidate();
+                state->sidebar.Invalidate();
+            } else if ((wParam == HOTKEY_SPLIT_DEC_ID || wParam == HOTKEY_SPLIT_INC_ID) && state->config.overlayEnabled) {
+                float step = (wParam == HOTKEY_SPLIT_INC_ID) ? 0.05f : -0.05f;
+                state->config.splitPreview = true;
+                state->config.splitPosition = std::clamp(state->config.splitPosition + step, 0.05f, 0.95f);
+                PushOverlayRenderState(*state, true);
                 state->configDirty = true;
                 state->lastConfigEditMs = GetTickCount64();
                 state->controlHub.Invalidate();
@@ -541,10 +705,12 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             }
             return 0;
         case WM_APP_SHOW_HUB:
+            state->overlay.RequestHdrRefresh();
             state->controlHub.Show(0);
             return 0;
         case WM_TRAYICON:
             if (lParam == WM_LBUTTONUP || lParam == WM_LBUTTONDBLCLK) {
+                state->overlay.RequestHdrRefresh();
                 state->controlHub.Show(0);
             } else if (lParam == WM_RBUTTONUP) {
                 ShowTrayMenu(state);
@@ -554,21 +720,28 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             UINT cmd = LOWORD(wParam);
             switch (cmd) {
                 case CMD_SHOW_HUB:
+                    state->overlay.RequestHdrRefresh();
                     state->controlHub.Show(0);
                     break;
                 case CMD_TOGGLE_SIDEBAR:
                     if (state->config.overlayEnabled) {
+                        if (!state->sidebar.IsOpen()) {
+                            state->overlay.RequestHdrRefresh();
+                        }
                         state->sidebar.Toggle();
                     }
                     break;
                 case CMD_TOGGLE_OVERLAY_MASTER:
                     state->config.overlayEnabled = !state->config.overlayEnabled;
                     SyncOverlayAndHotkey(*state);
-                    state->paramsDirty = true;
+                    PushOverlayRenderState(*state, true);
                     state->configDirty = true;
                     state->lastConfigEditMs = GetTickCount64();
                     state->controlHub.Invalidate();
                     state->sidebar.Invalidate();
+                    break;
+                case CMD_SCREENSHOT:
+                    TriggerFilteredScreenshot(*state);
                     break;
                 case CMD_PROFILE_0:
                 case CMD_PROFILE_1:
@@ -581,7 +754,7 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                         state->config.perAppProfile[state->currentAppExe] = p;
                     }
                     SyncOverlayAndHotkey(*state);
-                    state->paramsDirty = true;
+                    PushOverlayRenderState(*state, true);
                     state->configDirty = true;
                     state->lastConfigEditMs = GetTickCount64();
                     state->controlHub.Invalidate();
@@ -697,12 +870,13 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
     SidebarCallbacks scbs;
     scbs.onConfigChanged = [&state]() {
         SyncOverlayAndHotkey(state);
-        state.paramsDirty = true;
+        PushOverlayRenderState(state, true);
         state.configDirty = true;
         state.lastConfigEditMs = GetTickCount64();
         state.controlHub.Invalidate();
     };
     scbs.onOpenHub = [&state]() {
+        state.overlay.RequestHdrRefresh();
         state.controlHub.Show(0);
     };
     scbs.onExitRequested = [&state]() {
@@ -722,13 +896,14 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
     ControlHubCallbacks hcbs;
     hcbs.onConfigChanged = [&state]() {
         SyncOverlayAndHotkey(state);
-        state.paramsDirty = true;
+        PushOverlayRenderState(state, true);
         state.configDirty = true;
         state.lastConfigEditMs = GetTickCount64();
         state.lastFgCheckMs = 0; // Re-evaluate active game overrides cleanly
         state.sidebar.Invalidate();
     };
     hcbs.onOpenSidebar = [&state]() {
+        state.overlay.RequestHdrRefresh();
         state.sidebar.SetOpen(true);
     };
     hcbs.onExitRequested = [&state]() {
@@ -738,6 +913,9 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
     hcbs.onHotkeyCaptureChanged = [&state](bool capturing) {
         state.hotkeysSuspended = capturing;
         SyncOverlayAndHotkey(state);
+    };
+    hcbs.onScreenshotRequested = [&state]() {
+        TriggerFilteredScreenshot(state);
     };
 
     if (!state.controlHub.Initialize(hInst, &state.config, hcbs, err)) {
@@ -753,6 +931,12 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
     std::wstring adapter = state.overlay.GetAdapterName();
     state.sidebar.SetAdapterName(adapter);
     state.controlHub.SetAdapterName(adapter);
+    DisplayHdrInfo initHdr = state.overlay.GetDisplayHdrInfo();
+    state.sidebar.SetDisplayHdrInfo(initHdr);
+    state.controlHub.SetDisplayHdrInfo(initHdr);
+    FrameGenTelemetry initTel = state.overlay.GetTelemetry();
+    state.sidebar.SetTelemetry(initTel);
+    state.controlHub.SetTelemetry(initTel);
 
     state.appIcon = CreateAppTrayIcon(hInst);
     state.nid.cbSize = sizeof(state.nid);
@@ -782,11 +966,13 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
 
     // Activate hotkey/overlay per config and open desktop Control Hub (unless --minimized)
     SyncOverlayAndHotkey(state);
+    PushOverlayRenderState(state, true);
     if (!startMinimized) {
         state.controlHub.Show(0);
     }
 
     ULONGLONG lastZCheckMs = 0;
+    ULONGLONG lastTelMs = 0;
 
     while (state.running) {
         MSG msg{};
@@ -829,7 +1015,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
                     auto it = state.config.perAppProfile.find(fg.exeName);
                     if (it != state.config.perAppProfile.end() && it->second != state.config.activeProfile) {
                         state.config.activeProfile = it->second;
-                        state.paramsDirty = true;
+                        PushOverlayRenderState(state, true);
                         state.sidebar.Invalidate();
                         state.controlHub.Invalidate();
                     }
@@ -859,10 +1045,61 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
             SyncOverlayAndHotkey(state);
         }
 
-        // Maintain overlay + sidebar topmost order cleanly
+        // Maintain sidebar + overlay topmost z-order on owning threads cleanly
         if (now - lastZCheckMs >= 1000) {
             lastZCheckMs = now;
-            state.overlay.EnsureZOrder(state.sidebar.Hwnd());
+            if (state.sidebar.IsVisible()) {
+                SetWindowPos(state.sidebar.Hwnd(), HWND_TOPMOST, 0, 0, 0, 0, SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE);
+                if (state.overlay.IsActive()) {
+                    state.overlay.EnsureZOrder(state.sidebar.Hwnd());
+                }
+            }
+        }
+
+        // Event-driven HDR / display update notifications from render thread (WM_DISPLAYCHANGE)
+        DisplayHdrInfo nextHdr{};
+        if (state.overlay.ConsumeDisplayHdrUpdate(nextHdr)) {
+            state.sidebar.SetDisplayHdrInfo(nextHdr);
+            state.controlHub.SetDisplayHdrInfo(nextHdr);
+            PushOverlayRenderState(state, true);
+        }
+
+        // Push live Frame Gen & capture telemetry (immediately on status change, or every 500ms)
+        bool curOverlayActive = state.overlay.IsActive();
+        bool curUsingWgc = state.overlay.IsRecordableWgc();
+        bool statusFlipped = (curOverlayActive != state.lastTelActive || curUsingWgc != state.lastTelWgc);
+        if (lastTelMs == 0 || statusFlipped || (now - lastTelMs >= 500)) {
+            lastTelMs = now;
+            state.lastTelActive = curOverlayActive;
+            state.lastTelWgc = curUsingWgc;
+            if (state.sidebar.IsVisible() || state.controlHub.IsVisible()) {
+                FrameGenTelemetry tel = state.overlay.GetTelemetry();
+                if (state.sidebar.IsVisible()) state.sidebar.SetTelemetry(tel);
+                if (state.controlHub.IsVisible()) state.controlHub.SetTelemetry(tel);
+            }
+        }
+
+        // Poll completed built-in PNG screenshot result
+        {
+            bool ssOk = false;
+            std::wstring ssPath, ssErr;
+            if (state.overlay.ConsumeScreenshotResult(ssOk, ssPath, ssErr)) {
+                std::wstring fname = std::filesystem::path(ssPath).filename().wstring();
+                std::wstring toast = ssOk ? (L"Saved PNG: " + fname) : ssErr;
+                state.controlHub.ShowFooterToast(toast, !ssOk);
+                if (!state.controlHub.IsVisible() && state.trayAdded && state.trayHwnd) {
+                    NOTIFYICONDATAW tipNid = state.nid;
+                    tipNid.uFlags = NIF_INFO;
+                    wcscpy_s(tipNid.szInfoTitle, ssOk ? L"Filtered Screenshot Saved" : L"Screenshot Unavailable");
+                    std::wstring body = ssOk ? ssPath : ssErr;
+                    if (body.size() >= std::size(tipNid.szInfo)) {
+                        body.resize(std::size(tipNid.szInfo) - 1);
+                    }
+                    wcscpy_s(tipNid.szInfo, body.c_str());
+                    tipNid.dwInfoFlags = ssOk ? NIIF_INFO : NIIF_WARNING;
+                    Shell_NotifyIconW(NIM_MODIFY, &tipNid);
+                }
+            }
         }
 
         // Debounced config save (300ms after last edit)
@@ -873,20 +1110,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
 
         state.sidebar.TickAnimation();
 
-        if (state.overlay.IsActive()) {
-            int pIdx = std::clamp(state.config.activeProfile - 1, 0, 2);
-            if (state.overlay.TickAndRender(
-                    state.config.profiles[pIdx],
-                    state.config.splitPreview,
-                    state.config.splitPosition,
-                    state.paramsDirty)) {
-                state.paramsDirty = false;
-            }
-        } else {
-            // Idle wait (0% GPU/CPU when Overlay is Off or Auto-Paused)
-            bool uiAnimating = state.sidebar.IsVisible() || state.controlHub.IsVisible();
-            MsgWaitForMultipleObjects(0, nullptr, FALSE, uiAnimating ? 16 : 250, QS_ALLINPUT);
-        }
+        bool uiAnimating = state.sidebar.IsVisible() || state.controlHub.IsVisible();
+        MsgWaitForMultipleObjects(0, nullptr, FALSE, uiAnimating ? 16 : 200, QS_ALLINPUT);
     }
 
     if (state.configDirty) {
@@ -898,6 +1123,14 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
     }
     if (state.quickHotkeyRegistered) {
         UnregisterHotKey(state.trayHwnd, HOTKEY_QUICK_TOGGLE_ID);
+    }
+    if (state.screenshotHotkeyRegistered) {
+        UnregisterHotKey(state.trayHwnd, HOTKEY_SCREENSHOT_ID);
+    }
+    if (state.splitHotkeysRegistered) {
+        UnregisterHotKey(state.trayHwnd, HOTKEY_SPLIT_TOGGLE_ID);
+        UnregisterHotKey(state.trayHwnd, HOTKEY_SPLIT_DEC_ID);
+        UnregisterHotKey(state.trayHwnd, HOTKEY_SPLIT_INC_ID);
     }
     Shell_NotifyIconW(NIM_DELETE, &state.nid);
     if (state.appIcon) DestroyIcon(state.appIcon);

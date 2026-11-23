@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=AI Dynamic Vibrance Enhance
+GenericName=Linux Gaming Visual Enhancer
+Comment=Real-time visual enhancer and vkBasalt preset hub for Linux gaming
+Exec=ai-dynamic-vibrance-enhance
+Icon=ai-dynamic-vibrance-enhance
+Terminal=false
+Type=Application
+Categories=Game;Utility;Graphics;
+Keywords=vkBasalt;ReShade;Vibrance;Gaming;Proton;Steam;
+StartupWMClass=ai-dynamic-vibrance-enhance

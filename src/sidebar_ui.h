@@ -29,6 +29,8 @@ public:
     void Shutdown();
 
     void SetAdapterName(const std::wstring& adapterName);
+    void SetDisplayHdrInfo(const DisplayHdrInfo& info);
+    void SetTelemetry(const FrameGenTelemetry& tel);
     void SetActiveAppInfo(const std::wstring& exeName, const std::wstring& displayTitle, bool isGame, const std::wstring& engineTag);
     void SetExcludeFromCapture(bool exclude);
 
@@ -49,7 +51,7 @@ private:
         CTRL_PROFILE_2,
         CTRL_PROFILE_3,
 
-        // Core & optional filters (12 total, stable in-place toggles + sliders + resets)
+        // Core & optional filters (16 total, stable in-place toggles + sliders + resets)
         CTRL_TOGGLE_VIBRANCE,
         CTRL_SLIDER_INTENSITY,
         CTRL_SLIDER_SATURATION,
@@ -61,15 +63,38 @@ private:
 
         CTRL_TOGGLE_HDR,
         CTRL_SLIDER_HDR,
+        CTRL_SLIDER_HDR_PEAK,
+        CTRL_SLIDER_HDR_MIDGRAY,
         CTRL_RESET_HDR,
 
         CTRL_TOGGLE_DARK,
         CTRL_SLIDER_DARK,
         CTRL_RESET_DARK,
 
+        CTRL_TOGGLE_AO,
+        CTRL_SLIDER_AO_INTENSITY,
+        CTRL_SLIDER_AO_RADIUS,
+        CTRL_RESET_AO,
+
         CTRL_TOGGLE_CLARITY,
         CTRL_SLIDER_CLARITY,
         CTRL_RESET_CLARITY,
+
+        CTRL_TOGGLE_BLOOM,
+        CTRL_SLIDER_BLOOM_INT,
+        CTRL_SLIDER_BLOOM_THRESH,
+        CTRL_RESET_BLOOM,
+
+        CTRL_TOGGLE_FILMIC,
+        CTRL_FILMIC_MODE_0,
+        CTRL_FILMIC_MODE_1,
+        CTRL_FILMIC_MODE_2,
+        CTRL_SLIDER_FILMIC_STR,
+        CTRL_RESET_FILMIC,
+
+        CTRL_TOGGLE_DEBAND,
+        CTRL_SLIDER_DEBAND,
+        CTRL_RESET_DEBAND,
 
         CTRL_TOGGLE_BC,
         CTRL_SLIDER_BRIGHTNESS,
@@ -104,6 +129,23 @@ private:
         CTRL_CB_TYPE_2,
         CTRL_SLIDER_CBSTRENGTH,
         CTRL_RESET_COLORBLIND,
+
+        CTRL_SB_SCALE_0,
+        CTRL_SB_SCALE_1,
+        CTRL_SB_SCALE_2,
+        CTRL_SB_SCALE_3,
+        CTRL_SB_SCALE_4,
+
+        CTRL_SB_FG_0,
+        CTRL_SB_FG_1,
+        CTRL_SB_FG_2,
+        CTRL_SB_FG_3,
+        CTRL_SB_FG_4,
+
+        CTRL_SB_TOGGLE_SPLIT,
+        CTRL_SB_SPLIT_DEC,
+        CTRL_SB_SPLIT_INC,
+        CTRL_SB_SLIDER_SPLIT,
 
         CTRL_BTN_OPEN_HUB,
     };
@@ -148,6 +190,8 @@ private:
     D2D1_RECT_F activeTrackRect_ = {};
 
     std::wstring adapterName_ = L"Universal GPU";
+    DisplayHdrInfo displayHdr_{};
+    FrameGenTelemetry telemetry_{};
     std::wstring activeExe_ = L"desktop";
     std::wstring activeAppTitle_ = L"Desktop";
     bool activeAppIsGame_ = false;

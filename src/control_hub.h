@@ -16,6 +16,7 @@ struct ControlHubCallbacks {
     std::function<void()> onOpenSidebar;
     std::function<void()> onExitRequested;
     std::function<void(bool)> onHotkeyCaptureChanged;
+    std::function<void()> onScreenshotRequested;
 };
 
 class ControlHub {
@@ -35,12 +36,16 @@ public:
     HWND Hwnd() const { return hwnd_; }
 
     void SetAdapterName(const std::wstring& adapterName);
+    void SetDisplayHdrInfo(const DisplayHdrInfo& info);
+    void SetTelemetry(const FrameGenTelemetry& tel);
     void SetActiveAppInfo(const std::wstring& exeName, const std::wstring& displayTitle, bool isGame, const std::wstring& engineTag);
+    void ShowFooterToast(const std::wstring& message, bool isError = false);
     void Invalidate();
 
 private:
     enum HubControlKind {
         HUB_TAB_OVERVIEW,
+        HUB_TAB_SCALING,
         HUB_TAB_GAMES,
         HUB_TAB_PRESETS,
         HUB_TAB_LEGACY,
@@ -53,6 +58,7 @@ private:
         HUB_BTN_HOTKEY_SIDEBAR,
         HUB_TOGGLE_QUICKHOTKEY,
         HUB_BTN_HOTKEY_QUICK,
+        HUB_BTN_HOTKEY_SCREENSHOT,
         HUB_BTN_HOTKEY_RESET,
         HUB_TOGGLE_ONLYGAMES,
         HUB_TOGGLE_AUTOSWITCH,
@@ -71,9 +77,16 @@ private:
         HUB_PRESET_SLOT_1,
         HUB_PRESET_SLOT_2,
         HUB_PRESET_SLOT_3,
+        HUB_PRESET_QUICK_0,
+        HUB_PRESET_QUICK_1,
+        HUB_PRESET_QUICK_2,
+        HUB_PRESET_QUICK_3,
+        HUB_PRESET_QUICK_4,
         HUB_BTN_PRESET_EXPORT,
         HUB_BTN_PRESET_IMPORT,
+        HUB_BTN_SCREENSHOT,
         HUB_BTN_OPEN_DATA_FOLDER,
+        HUB_BTN_OPEN_SCREENSHOTS,
         HUB_BTN_RESET_PROFILE,
         HUB_BTN_RESET_ALL,
         HUB_BTN_OPEN_SIDEBAR,
@@ -85,6 +98,27 @@ private:
         HUB_BTN_RS_INSTALL,
         HUB_BTN_RS_REMOVE,
         HUB_BTN_GITHUB,
+
+        // Scaling & Optical Flow Frame Generation controls (v2.0.0)
+        HUB_SCALE_OFF,
+        HUB_SCALE_FSR1,
+        HUB_SCALE_NIS,
+        HUB_SCALE_INTEGER,
+        HUB_SCALE_ANIME4K,
+        HUB_SLIDER_SCALE_SHARP,
+        HUB_TOGGLE_SCALE_STRETCH,
+        HUB_FG_OFF,
+        HUB_FG_2X,
+        HUB_FG_3X,
+        HUB_FG_4X,
+        HUB_FG_ADAPTIVE,
+        HUB_SLIDER_FG_FLOWSCALE,
+        HUB_SLIDER_FG_TARGETFPS,
+        HUB_TOGGLE_FG_FALLBACK,
+        HUB_TOGGLE_FG_HUDPROTECT,
+        HUB_CAPTURE_DXGI,
+        HUB_CAPTURE_WGC,
+        HUB_TOGGLE_ALLOW_TEARING,
     };
 
     struct HitRect {
@@ -104,8 +138,10 @@ private:
     void DrawSettingIcon(int iconIdx, float x, float y);
     void DrawTogglePill(HubControlKind k, float x, float ty, bool on, bool large = false);
     void DrawFlatButton(HubControlKind k, const std::wstring& label, D2D1_RECT_F r, bool primary, bool danger = false, int payload = -1);
+    void DrawHubSlider(HubControlKind k, const std::wstring& label, const std::wstring& valueText, int val, int minVal, int maxVal, float sx, float sy, float sw);
 
     void RenderOverviewTab();
+    void RenderScalingTab();
     void RenderGamesTab();
     void RenderPresetsTab();
     void RenderLegacyTab();
@@ -116,12 +152,13 @@ private:
     void HandleMouseDown(float dipX, float dipY);
     void HandleMouseMove(float dipX, float dipY);
     void HandleMouseUp();
-    void UpdateSplitSliderFromX(float dipX, const D2D1_RECT_F& trackRect);
+    void UpdateHubSliderFromX(HubControlKind kind, float dipX, const D2D1_RECT_F& trackRect);
     void PickReShadeFolder();
     void PickExecutableForList(bool whitelist);
     void ExportPresetWithDialog();
     void ImportPresetWithDialog();
     void OpenDataFolder();
+    void OpenScreenshotsFolder();
 
     static LRESULT CALLBACK HubWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
@@ -135,16 +172,19 @@ private:
     static constexpr float kTopBarH = 54.0f;
     static constexpr float kFooterH = 48.0f;
 
-    int currentTab_ = 0; // 0 = Overview, 1 = Games, 2 = Presets, 3 = Legacy, 4 = About
+    int currentTab_ = 0; // 0 = Overview, 1 = Scaling, 2 = Games, 3 = Presets, 4 = Legacy, 5 = About
     bool draggingSlider_ = false;
+    HubControlKind activeSliderKind_ = HUB_SLIDER_SPLITPOS;
     D2D1_RECT_F activeTrackRect_ = {};
 
-    int recordingHotkey_ = 0; // 0 = none, 1 = sidebar hotkey, 2 = quick toggle hotkey
+    int recordingHotkey_ = 0; // 0 = none, 1 = sidebar, 2 = quick toggle, 3 = screenshot
     int wlPage_ = 0;
     int blPage_ = 0;
     int presetSlot_ = 1; // 1..3
 
     std::wstring adapterName_ = L"Universal GPU";
+    DisplayHdrInfo displayHdr_{};
+    FrameGenTelemetry telemetry_{};
     std::wstring activeExe_ = L"desktop";
     std::wstring activeAppTitle_ = L"Desktop";
     bool activeAppIsGame_ = false;
@@ -157,6 +197,9 @@ private:
     bool presetStatusError_ = false;
     std::wstring reshadeStatus_ = L"Ready to export AIDynamicVibranceEnhance.fx to a legacy game's Shaders folder.";
     bool reshadeStatusError_ = false;
+    std::wstring footerToast_;
+    bool footerToastError_ = false;
+    ULONGLONG footerToastUntilMs_ = 0;
 
     std::vector<HitRect> hitRects_;
 

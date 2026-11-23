@@ -1,0 +1,12 @@
+post_install() {
+  echo ":: AI Dynamic Vibrance Enhance (v2.0.0) installed."
+  echo ":: Ensure 'vkbasalt' is installed:"
+  echo "     - CachyOS / Garuda: sudo pacman -S vkbasalt lib32-vkbasalt"
+  echo "     - Arch / EndeavourOS: yay -S vkbasalt lib32-vkbasalt"
+  echo ":: Run 'ai-dynamic-vibrance-enhance' (or 'ai-dynamic-vibrance-enhance apply --preset balanced')"
+  echo ":: Add to Steam Launch Options: ENABLE_VKBASALT=1 %command%"
+}
+
+post_upgrade() {
+  post_install
+}

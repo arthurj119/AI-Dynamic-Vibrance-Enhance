@@ -6,4 +6,6 @@ out/
 *.res
 *.pdb
 *.ilk
+__pycache__/
+*.pyc
 profiles.json

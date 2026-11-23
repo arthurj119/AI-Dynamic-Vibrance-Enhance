@@ -1,0 +1,12 @@
+* text=auto
+*.sh text eol=lf
+*.py text eol=lf
+*.fx text eol=lf
+*.fxh text eol=lf
+*.desktop text eol=lf
+*.svg text eol=lf
+*.spec text eol=lf
+*.install text eol=lf
+PKGBUILD text eol=lf
+control text eol=lf
+*.yml text eol=lf

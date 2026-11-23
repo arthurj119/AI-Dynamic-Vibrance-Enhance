@@ -9,6 +9,9 @@
 
 std::filesystem::path GetExeDirectory();
 std::filesystem::path GetDefaultConfigPath();
+std::filesystem::path GetScreenshotsDirectory();
+FilterParams BuildCuratedPreset(int presetIdx);
+const wchar_t* GetCuratedPresetName(int presetIdx);
 
 struct ForegroundAppInfo {
     std::wstring exeName;
@@ -22,6 +25,7 @@ std::string WideToUtf8(const std::wstring& w);
 std::wstring Utf8ToWide(const std::string& s);
 std::wstring NormalizeExeFilename(const std::wstring& pathOrName);
 std::wstring FormatHotkeyString(uint32_t mods, uint32_t vk);
+bool IsTransientCaptureProcess(const std::wstring& exeLower);
 
 bool ClassifyProcessAsGame(
     const std::filesystem::path& exePath,

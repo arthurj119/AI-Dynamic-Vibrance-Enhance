@@ -8,6 +8,7 @@
 #include <windowsx.h>
 #include <algorithm>
 #include <cmath>
+#include <filesystem>
 
 using Microsoft::WRL::ComPtr;
 
@@ -138,7 +139,11 @@ std::wstring BuildProfileSummary(const FilterParams& fp) {
     if (fp.enableSharpen) active.push_back(L"Sharpen+");
     if (fp.enableDynamicHdr) active.push_back(L"Dynamic HDR");
     if (fp.enableDarkLighting) active.push_back(L"Dark Light");
+    if (fp.enableAmbientOcclusion) active.push_back(L"AO");
     if (fp.enableClarity) active.push_back(L"Clarity");
+    if (fp.enableBloom) active.push_back(L"Bloom");
+    if (fp.enableFilmic) active.push_back(L"Filmic");
+    if (fp.enableDeband) active.push_back(L"Deband");
     if (fp.enableBrightnessContrast) active.push_back(L"B/C");
     if (fp.enableColorTemp) active.push_back(L"Temp/Tint");
     if (fp.enableGammaExposure) active.push_back(L"Gamma/Exp");
@@ -146,7 +151,7 @@ std::wstring BuildProfileSummary(const FilterParams& fp) {
     if (fp.enableBlackAndWhite) active.push_back(L"B&W");
     if (fp.enableVignette) active.push_back(L"Vignette");
     if (fp.enableColorblind) active.push_back(L"Colorblind");
-    if (active.empty()) return L"All 12 filter modules off";
+    if (active.empty()) return L"All 16 filter modules off";
 
     std::wstring line;
     for (size_t i = 0; i < active.size(); ++i) {
@@ -154,6 +159,21 @@ std::wstring BuildProfileSummary(const FilterParams& fp) {
         line += active[i];
     }
     return line;
+}
+
+bool DetectReShadeInFolder(const std::wstring& folder) {
+    if (folder.empty()) return false;
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    fs::path dir(folder);
+    if (!fs::exists(dir, ec) || !fs::is_directory(dir, ec)) return false;
+    if (fs::exists(dir / L"reshade-shaders" / L"Shaders", ec)) return true;
+    if (_wcsicmp(dir.filename().c_str(), L"Shaders") == 0 &&
+        _wcsicmp(dir.parent_path().filename().c_str(), L"reshade-shaders") == 0) {
+        return true;
+    }
+    if (fs::exists(dir / L"ReShade.ini", ec)) return true;
+    return false;
 }
 
 } // namespace
@@ -266,7 +286,7 @@ void ControlHub::Shutdown() {
 
 void ControlHub::Show(int initialTab) {
     if (!hwnd_) return;
-    if (initialTab >= 0 && initialTab <= 4) {
+    if (initialTab >= 0 && initialTab <= 5) {
         currentTab_ = initialTab;
     }
     if (IsIconic(hwnd_)) {
@@ -288,6 +308,43 @@ void ControlHub::Hide() {
 
 void ControlHub::SetAdapterName(const std::wstring& adapterName) {
     adapterName_ = adapterName.empty() ? L"Universal GPU" : adapterName;
+    Invalidate();
+}
+
+void ControlHub::SetDisplayHdrInfo(const DisplayHdrInfo& info) {
+    if (info.hdrActive == displayHdr_.hdrActive &&
+        std::abs(info.maxLuminanceNits - displayHdr_.maxLuminanceNits) < 1.0f &&
+        std::abs(info.sdrWhiteNits - displayHdr_.sdrWhiteNits) < 1.0f) {
+        return;
+    }
+    displayHdr_ = info;
+    Invalidate();
+}
+
+void ControlHub::SetTelemetry(const FrameGenTelemetry& tel) {
+    ULONGLONG nowMs = GetTickCount64();
+    bool toastExpired = (footerToastUntilMs_ != 0 && nowMs >= footerToastUntilMs_);
+    if (toastExpired) {
+        footerToastUntilMs_ = 0;
+        footerToast_.clear();
+    }
+    bool changed = (tel.fgRunning != telemetry_.fgRunning) ||
+                   (tel.overlayActive != telemetry_.overlayActive) ||
+                   (tel.usingWgc != telemetry_.usingWgc) ||
+                   (tel.monitorHz != telemetry_.monitorHz) ||
+                   (std::abs(tel.sourceFps - telemetry_.sourceFps) >= 1.0f) ||
+                   (std::abs(tel.outputFps - telemetry_.outputFps) >= 1.0f);
+    if (!changed && !toastExpired) return;
+    telemetry_ = tel;
+    if (hwnd_ && IsWindowVisible(hwnd_) && !IsIconic(hwnd_)) {
+        Invalidate();
+    }
+}
+
+void ControlHub::ShowFooterToast(const std::wstring& message, bool isError) {
+    footerToast_ = message;
+    footerToastError_ = isError;
+    footerToastUntilMs_ = GetTickCount64() + 3500;
     Invalidate();
 }
 
@@ -325,7 +382,7 @@ bool ControlHub::CreateRenderResources() {
 
     HRESULT hr = d2dFactory_->CreateHwndRenderTarget(
         rtp,
-        D2D1::HwndRenderTargetProperties(hwnd_, sz, D2D1_PRESENT_OPTIONS_NONE),
+        D2D1::HwndRenderTargetProperties(hwnd_, sz, D2D1_PRESENT_OPTIONS_IMMEDIATELY),
         &rt_
     );
     if (FAILED(hr)) return false;
@@ -391,6 +448,21 @@ void ControlHub::DrawFlatButton(HubControlKind k, const std::wstring& label, D2D
     hitRects_.push_back({ k, r, false, payload });
 }
 
+void ControlHub::DrawHubSlider(HubControlKind k, const std::wstring& label, const std::wstring& valueText, int val, int minVal, int maxVal, float sx, float sy, float sw) {
+    DrawTxt(rt_.Get(), label, fmtBody_.Get(), D2D1::RectF(sx, sy, sx + sw - 96.0f, sy + 20.0f), brText_.Get());
+    DrawTxt(rt_.Get(), valueText, fmtSmall_.Get(), D2D1::RectF(sx + sw - 96.0f, sy + 1.0f, sx + sw, sy + 20.0f), brTextMuted_.Get());
+
+    D2D1_RECT_F track = D2D1::RectF(sx, sy + 27.0f, sx + sw, sy + 31.0f);
+    rt_->FillRoundedRectangle(D2D1::RoundedRect(track, 2, 2), brTrackBg_.Get());
+    int span = std::max(maxVal - minVal, 1);
+    float norm = static_cast<float>(std::clamp(val, minVal, maxVal) - minVal) / static_cast<float>(span);
+    float fillX = track.left + (track.right - track.left) * norm;
+    rt_->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(track.left, track.top, fillX, track.bottom), 2, 2), brAccent_.Get());
+    rt_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(fillX, sy + 29.0f), 6.5f, 6.5f), brText_.Get());
+    rt_->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(fillX, sy + 29.0f), 6.5f, 6.5f), brAccent_.Get(), 1.8f);
+    hitRects_.push_back({ k, D2D1::RectF(track.left - 4.0f, sy + 18.0f, track.right + 4.0f, sy + 42.0f), true, -1 });
+}
+
 void ControlHub::DrawSettingIcon(int iconIdx, float x, float y) {
     // 20x20 crisp vector crimson icons
     ID2D1SolidColorBrush* br = brAccent_.Get();
@@ -453,23 +525,23 @@ void ControlHub::DrawTopBarAndFooter() {
 
     std::wstring brandTitle = L"AI Dynamic Vibrance Enhance";
     rt_->DrawTextW(brandTitle.c_str(), static_cast<UINT32>(brandTitle.size()), fmtBrand_.Get(),
-                   D2D1::RectF(50, 17, 282, 39), brText_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+                   D2D1::RectF(50, 17, 270, 39), brText_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
 
-    // Centered 5 horizontal tabs: Overview | Games | Presets | Legacy | About
-    const wchar_t* tabLabels[5] = { L"Overview", L"Games", L"Presets", L"Legacy", L"About" };
-    const HubControlKind tabKinds[5] = {
-        HUB_TAB_OVERVIEW, HUB_TAB_GAMES, HUB_TAB_PRESETS, HUB_TAB_LEGACY, HUB_TAB_ABOUT
+    // Centered 6 horizontal tabs: Overview | Scaling | Games | Presets | Legacy | About
+    const wchar_t* tabLabels[6] = { L"Overview", L"Scaling", L"Games", L"Presets", L"Legacy", L"About" };
+    const HubControlKind tabKinds[6] = {
+        HUB_TAB_OVERVIEW, HUB_TAB_SCALING, HUB_TAB_GAMES, HUB_TAB_PRESETS, HUB_TAB_LEGACY, HUB_TAB_ABOUT
     };
-    const float tabStartX = 294.0f;
-    const float tabW = 76.0f;
-    for (int i = 0; i < 5; ++i) {
+    const float tabStartX = 276.0f;
+    const float tabW = 69.0f;
+    for (int i = 0; i < 6; ++i) {
         float tx = tabStartX + static_cast<float>(i) * tabW;
         D2D1_RECT_F tr = D2D1::RectF(tx, 6.0f, tx + tabW, kTopBarH);
         bool active = (currentTab_ == i);
         rt_->DrawTextW(tabLabels[i], static_cast<UINT32>(wcslen(tabLabels[i])), fmtCenter_.Get(), tr,
                        active ? brText_.Get() : brTextMuted_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
         if (active) {
-            rt_->FillRectangle(D2D1::RectF(tx + 12.0f, kTopBarH - 2.5f, tx + tabW - 12.0f, kTopBarH), brAccent_.Get());
+            rt_->FillRectangle(D2D1::RectF(tx + 10.0f, kTopBarH - 2.5f, tx + tabW - 10.0f, kTopBarH), brAccent_.Get());
         }
         hitRects_.push_back({ tabKinds[i], tr, false, -1 });
     }
@@ -517,24 +589,50 @@ void ControlHub::DrawTopBarAndFooter() {
     rt_->FillRectangle(D2D1::RectF(0, fy, W, H), brTopBar_.Get());
     rt_->DrawLine(D2D1::Point2F(0, fy), D2D1::Point2F(W, fy), brBorder_.Get(), 1.0f);
 
-    ID2D1SolidColorBrush* dotBr = config_->overlayEnabled ? brSuccess_.Get() : brTextMuted_.Get();
+    bool toastActive = (footerToastUntilMs_ != 0 && GetTickCount64() < footerToastUntilMs_ && !footerToast_.empty());
+    ID2D1SolidColorBrush* dotBr = toastActive
+        ? (footerToastError_ ? brDanger_.Get() : brSuccess_.Get())
+        : (config_->overlayEnabled ? brSuccess_.Get() : brTextMuted_.Get());
     rt_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(28.0f, fy + 24.0f), 4.0f, 4.0f), dotBr);
 
-    std::wstring stateLabel;
-    if (activeAppIsGame_) {
-        stateLabel = L"Playing: " + activeAppTitle_ + L" (" + activeEngineTag_ + L")";
-    } else if (!config_->overlayEnabled) {
-        stateLabel = L"Paused";
-    } else if (activeEngineTag_ == L"Ignored (User)") {
-        stateLabel = L"Ignored: " + activeAppTitle_;
+    std::wstring hdrBadge = displayHdr_.hdrActive
+        ? (L"HDR (" + std::to_wstring(static_cast<int>(std::lround(displayHdr_.maxLuminanceNits))) + L" nits)")
+        : L"SDR";
+    std::wstring footTxt;
+    ID2D1SolidColorBrush* txtBr = brTextMuted_.Get();
+    if (toastActive) {
+        footTxt = footerToast_;
+        txtBr = footerToastError_ ? brDanger_.Get() : brSuccess_.Get();
     } else {
-        stateLabel = L"Standby";
+        std::wstring stateLabel;
+        if (!config_->overlayEnabled) {
+            stateLabel = L"Paused";
+        } else if (activeEngineTag_ == L"Ignored (User)") {
+            stateLabel = L"Ignored: " + activeAppTitle_;
+        } else if (activeAppIsGame_ && telemetry_.overlayActive) {
+            stateLabel = L"Playing: " + activeAppTitle_ + (telemetry_.usingWgc ? L" (WGC OBS)" : L" (DXGI)");
+        } else if (activeAppIsGame_) {
+            stateLabel = L"Playing: " + activeAppTitle_ + L" (" + activeEngineTag_ + L")";
+        } else if (telemetry_.overlayActive) {
+            std::wstring targetName = activeAppTitle_.empty() ? L"Desktop" : activeAppTitle_;
+            stateLabel = L"Active: " + targetName + (telemetry_.usingWgc ? L" (WGC OBS)" : L" (DXGI)");
+        } else {
+            stateLabel = L"Standby";
+        }
+        footTxt = adapterName_ + L" (" + hdrBadge + L")  \u2022  " + stateLabel;
+        if (telemetry_.fgRunning && telemetry_.outputFps > 1.0f) {
+            footTxt += L"  \u2022  " + std::to_wstring(static_cast<int>(std::lround(telemetry_.sourceFps))) +
+                       L" -> " + std::to_wstring(static_cast<int>(std::lround(telemetry_.outputFps))) + L" FPS";
+        }
+        txtBr = telemetry_.overlayActive ? brAccent_.Get() : brTextMuted_.Get();
     }
-    std::wstring footTxt = adapterName_ + L"  \u2022  " + stateLabel;
     rt_->DrawTextW(footTxt.c_str(), static_cast<UINT32>(footTxt.size()), fmtBody_.Get(),
-                   D2D1::RectF(40, fy + 15, 675, fy + 35),
-                   activeAppIsGame_ ? brAccent_.Get() : brTextMuted_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+                   D2D1::RectF(40, fy + 15, 548, fy + 35),
+                   txtBr, D2D1_DRAW_TEXT_OPTIONS_CLIP);
 
+    std::wstring shotHkStr = FormatHotkeyString(config_->screenshotHotkeyMods, config_->screenshotHotkeyVk);
+    std::wstring shotBtnLabel = (shotHkStr.size() <= 9) ? (L"Shot (" + shotHkStr + L")") : L"Screenshot";
+    DrawFlatButton(HUB_BTN_SCREENSHOT, shotBtnLabel, D2D1::RectF(558, fy + 10, 686, fy + 38), false);
     DrawFlatButton(HUB_BTN_OPEN_DATA_FOLDER, L"Data Folder", D2D1::RectF(696, fy + 10, 802, fy + 38), false);
     DrawFlatButton(HUB_BTN_EXIT, L"Exit", D2D1::RectF(812, fy + 10, 896, fy + 38), false, true);
 }
@@ -544,6 +642,7 @@ void ControlHub::RenderOverviewTab() {
     const float cw = kHubDipW - 48.0f; // 872
     const std::wstring sidebarHkStr = FormatHotkeyString(config_->sidebarHotkeyMods, config_->sidebarHotkeyVk);
     const std::wstring quickHkStr = FormatHotkeyString(config_->quickToggleMods, config_->quickToggleVk);
+    const std::wstring shotHkStr = FormatHotkeyString(config_->screenshotHotkeyMods, config_->screenshotHotkeyVk);
 
     // Hero Engine Bar (y = 70..130, h = 60)
     D2D1_RECT_F heroR = D2D1::RectF(cx0, 70.0f, cx0 + cw, 130.0f);
@@ -561,9 +660,19 @@ void ControlHub::RenderOverviewTab() {
     rt_->DrawTextW(badgeTxt.c_str(), static_cast<UINT32>(badgeTxt.size()), fmtCenter_.Get(),
                    badge, brText_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
 
+    // Clickable Screenshot Hotkey Chip
+    bool recShot = (recordingHotkey_ == 3);
+    D2D1_RECT_F shotChip = D2D1::RectF(cx0 + cw - 468, 84, cx0 + cw - 314, 116);
+    rt_->FillRoundedRectangle(D2D1::RoundedRect(shotChip, 6, 6), recShot ? brAccentSoft_.Get() : brBg_.Get());
+    rt_->DrawRoundedRectangle(D2D1::RoundedRect(shotChip, 6, 6), recShot ? brAccent_.Get() : brBorder_.Get(), recShot ? 1.5f : 1.0f);
+    std::wstring shotChipTxt = recShot ? L"Press keys... (Esc)" : (L"Shot: " + shotHkStr);
+    rt_->DrawTextW(shotChipTxt.c_str(), static_cast<UINT32>(shotChipTxt.size()), fmtCenter_.Get(),
+                   shotChip, brText_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+    hitRects_.push_back({ HUB_BTN_HOTKEY_SCREENSHOT, shotChip, false, -1 });
+
     // Clickable Sidebar Hotkey Chip
     bool recSide = (recordingHotkey_ == 1);
-    D2D1_RECT_F sideChip = D2D1::RectF(cx0 + cw - 306, 84, cx0 + cw - 134, 116);
+    D2D1_RECT_F sideChip = D2D1::RectF(cx0 + cw - 304, 84, cx0 + cw - 134, 116);
     rt_->FillRoundedRectangle(D2D1::RoundedRect(sideChip, 6, 6), recSide ? brAccentSoft_.Get() : brBg_.Get());
     rt_->DrawRoundedRectangle(D2D1::RoundedRect(sideChip, 6, 6), recSide ? brAccent_.Get() : brBorder_.Get(), recSide ? 1.5f : 1.0f);
     std::wstring sideChipTxt = recSide ? L"Press keys... (Esc)" : (L"Sidebar: " + sidebarHkStr);
@@ -715,6 +824,225 @@ void ControlHub::RenderOverviewTab() {
                    hotkeyStatusError_ ? brDanger_.Get() : brTextMuted_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
 }
 
+void ControlHub::RenderScalingTab() {
+    const float cx0 = 24.0f;
+    const float cw = kHubDipW - 48.0f;
+
+    DrawTxt(rt_.Get(), L"Spatial Scaling & Frame Generation", fmtTitle_.Get(),
+            D2D1::RectF(cx0, 70, cx0 + cw, 94), brText_.Get());
+    DrawTxt(rt_.Get(), L"Upscale windowed games with sharp edge reconstruction and synthesize smoother motion across all GPUs.",
+            fmtBody_.Get(), D2D1::RectF(cx0, 96, cx0 + cw, 114), brTextMuted_.Get());
+
+    const wchar_t* scaleLabels[5] = { L"Off", L"FSR 1.0", L"NIS", L"Integer", L"Anime4K" };
+    const HubControlKind scaleKinds[5] = {
+        HUB_SCALE_OFF, HUB_SCALE_FSR1, HUB_SCALE_NIS, HUB_SCALE_INTEGER, HUB_SCALE_ANIME4K
+    };
+    const wchar_t* fgLabels[5] = { L"Off", L"2x", L"3x", L"4x", L"Adaptive" };
+    const HubControlKind fgKinds[5] = {
+        HUB_FG_OFF, HUB_FG_2X, HUB_FG_3X, HUB_FG_4X, HUB_FG_ADAPTIVE
+    };
+
+    const wchar_t* scaleDescText = L"Bypassed (0% GPU cost). Native game resolution passes directly to color filters.";
+    switch (config_->scaleMode) {
+        case SCALE_FSR1:    scaleDescText = L"AMD FSR 1.0 (12-tap EASU edge reconstruction + RCAS crisp sharpening). Best for 3D games."; break;
+        case SCALE_NIS:     scaleDescText = L"NVIDIA NIS style Catmull-Rom + directional adaptive unsharp mask across all GPUs."; break;
+        case SCALE_INTEGER: scaleDescText = L"Pixel-perfect integer scaling with crisp pixels and centered aspect framing. Ideal for retro & 2D."; break;
+        case SCALE_ANIME4K: scaleDescText = L"Anime4K Sobel dark-line thinning & cel-shaded detail restoration for anime/stylized titles."; break;
+        default: break;
+    }
+
+    auto drawSelectorRow = [&](float sx, float sy, float sw, const wchar_t* const labels[5], const HubControlKind kinds[5], int activeVal) {
+        float gap = 6.0f;
+        float bw = (sw - gap * 4.0f) / 5.0f;
+        for (int i = 0; i < 5; ++i) {
+            float bx = sx + static_cast<float>(i) * (bw + gap);
+            D2D1_RECT_F br = D2D1::RectF(bx, sy, bx + bw, sy + 32.0f);
+            bool sel = (activeVal == i);
+            rt_->FillRoundedRectangle(D2D1::RoundedRect(br, 6, 6), sel ? brAccent_.Get() : brBg_.Get());
+            if (!sel) rt_->DrawRoundedRectangle(D2D1::RoundedRect(br, 6, 6), brBorder_.Get(), 1.0f);
+            DrawTxt(rt_.Get(), labels[i], fmtCenter_.Get(), br, sel ? brText_.Get() : brTextMuted_.Get());
+            hitRects_.push_back({ kinds[i], br, false, -1 });
+        }
+    };
+
+    std::wstring targetDesc = std::to_wstring(config_->fgAdaptiveTargetFps) + L" FPS / " + std::to_wstring(telemetry_.monitorHz) + L" Hz";
+
+    if (!config_->hubListView) {
+        const float colW = (cw - 16.0f) * 0.5f;
+        const float cardY = 124.0f;
+        const float cardH = 338.0f;
+
+        // Left Card: Spatial Upscaling
+        D2D1_RECT_F lCard = D2D1::RectF(cx0, cardY, cx0 + colW, cardY + cardH);
+        rt_->FillRoundedRectangle(D2D1::RoundedRect(lCard, 10, 10), brCard_.Get());
+        rt_->DrawRoundedRectangle(D2D1::RoundedRect(lCard, 10, 10), (config_->scaleMode != SCALE_OFF) ? brAccent_.Get() : brBorder_.Get(), 1.0f);
+
+        float lx = cx0 + 18.0f;
+        float lw = colW - 36.0f;
+        DrawTxt(rt_.Get(), L"Spatial Upscaling (Windowed -> Fullscreen)", fmtSection_.Get(),
+                D2D1::RectF(lx, 138, lx + lw, 160), brText_.Get());
+        rt_->DrawLine(D2D1::Point2F(lx, 166), D2D1::Point2F(lx + lw, 166), brBorder_.Get(), 1.0f);
+
+        drawSelectorRow(lx, 176.0f, lw, scaleLabels, scaleKinds, config_->scaleMode);
+
+        DrawHubSlider(HUB_SLIDER_SCALE_SHARP, L"Upscale Sharpness", std::to_wstring(config_->scaleSharpness) + L"%",
+                      config_->scaleSharpness, 0, 100, lx, 224.0f, lw);
+
+        DrawTxt(rt_.Get(), L"Fullscreen Stretch (Windowed Games)", fmtBody_.Get(),
+                D2D1::RectF(lx, 286, lx + lw - 46, 306), brText_.Get());
+        DrawTxt(rt_.Get(), L"Scales lower-res windowed games cleanly to full screen", fmtSmall_.Get(),
+                D2D1::RectF(lx, 306, lx + lw - 46, 324), brTextMuted_.Get());
+        DrawTogglePill(HUB_TOGGLE_SCALE_STRETCH, lx + lw - 38, 294.0f, config_->scaleFullscreenStretch, false);
+
+        rt_->DrawLine(D2D1::Point2F(lx, 334.0f), D2D1::Point2F(lx + lw, 334.0f), brBorder_.Get(), 1.0f);
+        DrawTxt(rt_.Get(), L"Capture & Display Sync", fmtSmall_.Get(),
+                D2D1::RectF(lx, 342.0f, lx + lw, 360.0f), brText_.Get());
+
+        float capGap = 8.0f;
+        float capBw = (lw - capGap) * 0.5f;
+        D2D1_RECT_F dxgiBtn = D2D1::RectF(lx, 364.0f, lx + capBw, 394.0f);
+        D2D1_RECT_F wgcBtn = D2D1::RectF(lx + capBw + capGap, 364.0f, lx + lw, 394.0f);
+        bool dxgiSel = (config_->captureApi == CAPTURE_DXGI);
+        bool wgcSel = (config_->captureApi == CAPTURE_WGC);
+        rt_->FillRoundedRectangle(D2D1::RoundedRect(dxgiBtn, 6, 6), dxgiSel ? brAccent_.Get() : brBg_.Get());
+        if (!dxgiSel) rt_->DrawRoundedRectangle(D2D1::RoundedRect(dxgiBtn, 6, 6), brBorder_.Get(), 1.0f);
+        DrawTxt(rt_.Get(), L"DXGI Smooth (Default)", fmtCenter_.Get(), dxgiBtn, dxgiSel ? brText_.Get() : brTextMuted_.Get());
+        hitRects_.push_back({ HUB_CAPTURE_DXGI, dxgiBtn, false, -1 });
+
+        rt_->FillRoundedRectangle(D2D1::RoundedRect(wgcBtn, 6, 6), wgcSel ? brAccent_.Get() : brBg_.Get());
+        if (!wgcSel) rt_->DrawRoundedRectangle(D2D1::RoundedRect(wgcBtn, 6, 6), brBorder_.Get(), 1.0f);
+        DrawTxt(rt_.Get(), L"WGC (OBS Capture)", fmtCenter_.Get(), wgcBtn, wgcSel ? brText_.Get() : brTextMuted_.Get());
+        hitRects_.push_back({ HUB_CAPTURE_WGC, wgcBtn, false, -1 });
+
+        DrawTxt(rt_.Get(), L"VRR / Allow Tearing (FreeSync)", fmtBody_.Get(),
+                D2D1::RectF(lx, 404.0f, lx + lw - 46, 424.0f), brText_.Get());
+        DrawTxt(rt_.Get(), L"Bypasses DWM VSync lock for smooth FreeSync / G-Sync pacing", fmtSmall_.Get(),
+                D2D1::RectF(lx, 424.0f, lx + lw - 46, 444.0f), brTextMuted_.Get());
+        DrawTogglePill(HUB_TOGGLE_ALLOW_TEARING, lx + lw - 38, 412.0f, config_->allowTearing, false);
+
+        // Right Card: Optical Flow Frame Generation
+        float rx0 = cx0 + colW + 16.0f;
+        D2D1_RECT_F rCard = D2D1::RectF(rx0, cardY, rx0 + colW, cardY + cardH);
+        rt_->FillRoundedRectangle(D2D1::RoundedRect(rCard, 10, 10), brCard_.Get());
+        rt_->DrawRoundedRectangle(D2D1::RoundedRect(rCard, 10, 10), (config_->fgMode != FG_OFF) ? brAccent_.Get() : brBorder_.Get(), 1.0f);
+
+        float rx = rx0 + 18.0f;
+        DrawTxt(rt_.Get(), L"Optical Flow Frame Generation (All GPUs)", fmtSection_.Get(),
+                D2D1::RectF(rx, 138, rx + lw, 160), brText_.Get());
+        rt_->DrawLine(D2D1::Point2F(rx, 166), D2D1::Point2F(rx + lw, 166), brBorder_.Get(), 1.0f);
+
+        drawSelectorRow(rx, 176.0f, lw, fgLabels, fgKinds, config_->fgMode);
+
+        DrawHubSlider(HUB_SLIDER_FG_FLOWSCALE, L"Optical Flow Scale", std::to_wstring(config_->fgFlowScale) + L"%",
+                      config_->fgFlowScale, 25, 100, rx, 224.0f, lw);
+
+        DrawHubSlider(HUB_SLIDER_FG_TARGETFPS, L"Adaptive Target FPS", targetDesc,
+                      config_->fgAdaptiveTargetFps, 60, 240, rx, 276.0f, lw);
+
+        DrawTxt(rt_.Get(), L"AFMF Fast-Motion Fallback", fmtBody_.Get(),
+                D2D1::RectF(rx, 338, rx + lw - 46, 358), brText_.Get());
+        DrawTxt(rt_.Get(), L"Reduces ghosting during whip camera pans & scene cuts", fmtSmall_.Get(),
+                D2D1::RectF(rx, 358, rx + lw - 46, 376), brTextMuted_.Get());
+        DrawTogglePill(HUB_TOGGLE_FG_FALLBACK, rx + lw - 38, 344.0f, config_->fgFastMotionFallback, false);
+
+        DrawTxt(rt_.Get(), L"Static HUD Protection", fmtBody_.Get(),
+                D2D1::RectF(rx, 392, rx + lw - 46, 412), brText_.Get());
+        DrawTxt(rt_.Get(), L"Preserves sharp crosshairs & stationary game UI overlays", fmtSmall_.Get(),
+                D2D1::RectF(rx, 412, rx + lw - 46, 430), brTextMuted_.Get());
+        DrawTogglePill(HUB_TOGGLE_FG_HUDPROTECT, rx + lw - 38, 398.0f, config_->fgStaticHudProtect, false);
+    } else {
+        // List View: Top Horizontal Spatial Upscaling Panel + Bottom Optical Flow Panel
+        D2D1_RECT_F topPanel = D2D1::RectF(cx0, 124.0f, cx0 + cw, 282.0f);
+        rt_->FillRoundedRectangle(D2D1::RoundedRect(topPanel, 10, 10), brCard_.Get());
+        rt_->DrawRoundedRectangle(D2D1::RoundedRect(topPanel, 10, 10), brBorder_.Get(), 1.0f);
+
+        float mx = cx0 + 18.0f;
+        float mw = cw - 36.0f;
+        DrawTxt(rt_.Get(), L"Spatial Upscaling", fmtSection_.Get(), D2D1::RectF(mx, 138, mx + 220, 162), brText_.Get());
+        drawSelectorRow(mx + 230.0f, 133.0f, mw - 230.0f, scaleLabels, scaleKinds, config_->scaleMode);
+
+        float halfW = (mw - 24.0f) * 0.5f;
+        DrawHubSlider(HUB_SLIDER_SCALE_SHARP, L"Upscale Sharpness", std::to_wstring(config_->scaleSharpness) + L"%",
+                      config_->scaleSharpness, 0, 100, mx, 184.0f, halfW);
+        DrawTxt(rt_.Get(), L"Fullscreen Stretch (Windowed)", fmtBody_.Get(),
+                D2D1::RectF(mx + halfW + 24.0f, 184.0f, mx + mw - 46.0f, 206.0f), brText_.Get());
+        DrawTogglePill(HUB_TOGGLE_SCALE_STRETCH, mx + mw - 38.0f, 186.0f, config_->scaleFullscreenStretch, false);
+
+        DrawTxt(rt_.Get(), L"Capture API:", fmtBody_.Get(), D2D1::RectF(mx, 243.0f, mx + 92.0f, 265.0f), brText_.Get());
+        bool dxgiSel = (config_->captureApi == CAPTURE_DXGI);
+        bool wgcSel = (config_->captureApi == CAPTURE_WGC);
+        D2D1_RECT_F dxgiBtn = D2D1::RectF(mx + 98.0f, 240.0f, mx + 248.0f, 268.0f);
+        D2D1_RECT_F wgcBtn = D2D1::RectF(mx + 256.0f, 240.0f, mx + halfW, 268.0f);
+        rt_->FillRoundedRectangle(D2D1::RoundedRect(dxgiBtn, 6, 6), dxgiSel ? brAccent_.Get() : brBg_.Get());
+        if (!dxgiSel) rt_->DrawRoundedRectangle(D2D1::RoundedRect(dxgiBtn, 6, 6), brBorder_.Get(), 1.0f);
+        DrawTxt(rt_.Get(), L"DXGI Smooth", fmtCenter_.Get(), dxgiBtn, dxgiSel ? brText_.Get() : brTextMuted_.Get());
+        hitRects_.push_back({ HUB_CAPTURE_DXGI, dxgiBtn, false, -1 });
+
+        rt_->FillRoundedRectangle(D2D1::RoundedRect(wgcBtn, 6, 6), wgcSel ? brAccent_.Get() : brBg_.Get());
+        if (!wgcSel) rt_->DrawRoundedRectangle(D2D1::RoundedRect(wgcBtn, 6, 6), brBorder_.Get(), 1.0f);
+        DrawTxt(rt_.Get(), L"WGC OBS", fmtCenter_.Get(), wgcBtn, wgcSel ? brText_.Get() : brTextMuted_.Get());
+        hitRects_.push_back({ HUB_CAPTURE_WGC, wgcBtn, false, -1 });
+
+        DrawTxt(rt_.Get(), L"VRR / Allow Tearing (FreeSync)", fmtBody_.Get(),
+                D2D1::RectF(mx + halfW + 24.0f, 243.0f, mx + mw - 46.0f, 265.0f), brText_.Get());
+        DrawTogglePill(HUB_TOGGLE_ALLOW_TEARING, mx + mw - 38.0f, 244.0f, config_->allowTearing, false);
+
+        D2D1_RECT_F botPanel = D2D1::RectF(cx0, 294.0f, cx0 + cw, 462.0f);
+        rt_->FillRoundedRectangle(D2D1::RoundedRect(botPanel, 10, 10), brCard_.Get());
+        rt_->DrawRoundedRectangle(D2D1::RoundedRect(botPanel, 10, 10), brBorder_.Get(), 1.0f);
+
+        DrawTxt(rt_.Get(), L"Optical Flow Frame Generation", fmtSection_.Get(), D2D1::RectF(mx, 308, mx + 240, 332), brText_.Get());
+        drawSelectorRow(mx + 250.0f, 303.0f, mw - 250.0f, fgLabels, fgKinds, config_->fgMode);
+
+        DrawHubSlider(HUB_SLIDER_FG_FLOWSCALE, L"Optical Flow Scale", std::to_wstring(config_->fgFlowScale) + L"%",
+                      config_->fgFlowScale, 25, 100, mx, 352.0f, halfW);
+        DrawHubSlider(HUB_SLIDER_FG_TARGETFPS, L"Adaptive Target FPS", targetDesc,
+                      config_->fgAdaptiveTargetFps, 60, 240, mx + halfW + 24.0f, 352.0f, halfW);
+
+        DrawTxt(rt_.Get(), L"AFMF Fast-Motion Fallback", fmtBody_.Get(),
+                D2D1::RectF(mx, 414.0f, mx + halfW - 46.0f, 436.0f), brText_.Get());
+        DrawTogglePill(HUB_TOGGLE_FG_FALLBACK, mx + halfW - 38.0f, 414.0f, config_->fgFastMotionFallback, false);
+
+        DrawTxt(rt_.Get(), L"Static HUD Protection", fmtBody_.Get(),
+                D2D1::RectF(mx + halfW + 24.0f, 414.0f, mx + mw - 46.0f, 436.0f), brText_.Get());
+        DrawTogglePill(HUB_TOGGLE_FG_HUDPROTECT, mx + mw - 38.0f, 414.0f, config_->fgStaticHudProtect, false);
+    }
+
+    // Telemetry & Best Practices Footer Strip (y = 474..520)
+    D2D1_RECT_F telR = D2D1::RectF(cx0, 474.0f, cx0 + cw, 520.0f);
+    rt_->FillRoundedRectangle(D2D1::RoundedRect(telR, 8, 8), brCard_.Get());
+    rt_->DrawRoundedRectangle(D2D1::RoundedRect(telR, 8, 8),
+                              (telemetry_.fgRunning || telemetry_.overlayActive) ? brAccent_.Get() : brBorder_.Get(), 1.0f);
+
+    std::wstring vrrTag = config_->allowTearing ? L"ON" : L"OFF";
+    std::wstring hzStr = std::to_wstring(telemetry_.monitorHz) + L" Hz";
+    std::wstring shotHk = FormatHotkeyString(config_->screenshotHotkeyMods, config_->screenshotHotkeyVk);
+    std::wstring telTxt;
+    if (telemetry_.fgRunning && telemetry_.outputFps > 1.0f) {
+        std::wstring liveCap = telemetry_.usingWgc ? L"WGC OBS" : L"DXGI";
+        telTxt = L"Live Frame Gen: " + std::to_wstring(static_cast<int>(std::lround(telemetry_.sourceFps))) +
+                 L" -> " + std::to_wstring(static_cast<int>(std::lround(telemetry_.outputFps))) +
+                 L" FPS  \u2022  Monitor: " + hzStr +
+                 L"  \u2022  Live: " + liveCap + L"  \u2022  VRR: " + vrrTag + L"  \u2022  Filters apply after scaling";
+    } else if (telemetry_.overlayActive) {
+        if (telemetry_.usingWgc) {
+            telTxt = L"Active (Monitor: " + hzStr + L"  \u2022  Live: WGC OBS  \u2022  VRR: " + vrrTag +
+                     L")  \u2022  OBS & Windows Screenshot Ready";
+        } else if (config_->captureApi == CAPTURE_WGC) {
+            telTxt = L"Active (Monitor: " + hzStr + L"  \u2022  Live: DXGI Fallback)  \u2022  Focus a window for WGC OBS or press " + shotHk;
+        } else {
+            telTxt = L"Active (Monitor: " + hzStr + L"  \u2022  Live: DXGI Smooth  \u2022  VRR: " + vrrTag +
+                     L")  \u2022  Press " + shotHk + L" for filtered PNG";
+        }
+    } else {
+        std::wstring modeTag = (config_->captureApi == CAPTURE_WGC) ? L"WGC OBS" : L"DXGI Smooth";
+        telTxt = L"Standby (Monitor: " + hzStr + L"  \u2022  Mode: " + modeTag +
+                 L"  \u2022  VRR: " + vrrTag + L")  \u2022  " + shotHk + L" saves filtered PNG";
+    }
+    DrawTxt(rt_.Get(), telTxt, fmtSmall_.Get(), D2D1::RectF(cx0 + 16.0f, 489.0f, cx0 + cw - 16.0f, 510.0f),
+            (telemetry_.fgRunning || telemetry_.overlayActive) ? brText_.Get() : brTextMuted_.Get());
+}
+
 void ControlHub::RenderGamesTab() {
     const float cx0 = 24.0f;
     const float cw = kHubDipW - 48.0f;
@@ -815,73 +1143,105 @@ void ControlHub::RenderPresetsTab() {
         for (int i = 0; i < 3; ++i) {
             float sx = cx0 + static_cast<float>(i) * (cardW + gap);
             bool sel = (presetSlot_ == (i + 1));
-            D2D1_RECT_F sr = D2D1::RectF(sx, 124, sx + cardW, 268);
+            D2D1_RECT_F sr = D2D1::RectF(sx, 122, sx + cardW, 234);
             rt_->FillRoundedRectangle(D2D1::RoundedRect(sr, 10, 10), sel ? brAccentSoft_.Get() : brCard_.Get());
             rt_->DrawRoundedRectangle(D2D1::RoundedRect(sr, 10, 10), sel ? brAccent_.Get() : brBorder_.Get(), sel ? 1.6f : 1.0f);
 
             std::wstring pTitle = L"Profile " + std::to_wstring(i + 1);
             rt_->DrawTextW(pTitle.c_str(), static_cast<UINT32>(pTitle.size()), fmtSection_.Get(),
-                           D2D1::RectF(sx + 16, 138, sx + cardW - 92, 160), brText_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+                           D2D1::RectF(sx + 16, 132, sx + cardW - 92, 154), brText_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
             if (sel) {
-                D2D1_RECT_F pill = D2D1::RectF(sx + cardW - 84, 138, sx + cardW - 14, 158);
+                D2D1_RECT_F pill = D2D1::RectF(sx + cardW - 84, 132, sx + cardW - 14, 152);
                 rt_->FillRoundedRectangle(D2D1::RoundedRect(pill, 4, 4), brAccent_.Get());
                 rt_->DrawTextW(L"Selected", 8, fmtCenter_.Get(), pill, brText_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
             }
             std::wstring sum = BuildProfileSummary(config_->profiles[i]);
-            rt_->DrawTextW(sum.c_str(), static_cast<UINT32>(sum.size()), fmtBody_.Get(),
-                           D2D1::RectF(sx + 16, 170, sx + cardW - 16, 254), brTextMuted_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+            rt_->DrawTextW(sum.c_str(), static_cast<UINT32>(sum.size()), fmtSmall_.Get(),
+                           D2D1::RectF(sx + 16, 158, sx + cardW - 16, 226), brTextMuted_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
             hitRects_.push_back({ slotKinds[i], sr, false, -1 });
         }
     } else {
-        D2D1_RECT_F panel = D2D1::RectF(cx0, 124, cx0 + cw, 268);
+        D2D1_RECT_F panel = D2D1::RectF(cx0, 122, cx0 + cw, 236);
         rt_->FillRoundedRectangle(D2D1::RoundedRect(panel, 10, 10), brCard_.Get());
         rt_->DrawRoundedRectangle(D2D1::RoundedRect(panel, 10, 10), brBorder_.Get(), 1.0f);
         for (int i = 0; i < 3; ++i) {
-            float ry = 124.0f + static_cast<float>(i) * 48.0f;
+            float ry = 122.0f + static_cast<float>(i) * 38.0f;
             if (i > 0) rt_->DrawLine(D2D1::Point2F(cx0 + 16, ry), D2D1::Point2F(cx0 + cw - 16, ry), brBorder_.Get(), 1.0f);
             bool sel = (presetSlot_ == (i + 1));
-            D2D1_RECT_F rr = D2D1::RectF(cx0, ry, cx0 + cw, ry + 48.0f);
-            if (sel) rt_->FillRectangle(D2D1::RectF(cx0 + 1, ry + 6, cx0 + 4.5f, ry + 42), brAccent_.Get());
+            D2D1_RECT_F rr = D2D1::RectF(cx0, ry, cx0 + cw, ry + 38.0f);
+            if (sel) rt_->FillRectangle(D2D1::RectF(cx0 + 1, ry + 5, cx0 + 4.5f, ry + 33), brAccent_.Get());
             std::wstring pTitle = L"Profile " + std::to_wstring(i + 1) + (sel ? L"  (Selected)" : L"");
             rt_->DrawTextW(pTitle.c_str(), static_cast<UINT32>(pTitle.size()), fmtSection_.Get(),
-                           D2D1::RectF(cx0 + 18, ry + 14, cx0 + 210, ry + 34), sel ? brText_.Get() : brTextMuted_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+                           D2D1::RectF(cx0 + 18, ry + 9, cx0 + 210, ry + 29), sel ? brText_.Get() : brTextMuted_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
             std::wstring sum = BuildProfileSummary(config_->profiles[i]);
             rt_->DrawTextW(sum.c_str(), static_cast<UINT32>(sum.size()), fmtSmall_.Get(),
-                           D2D1::RectF(cx0 + 220, ry + 16, cx0 + cw - 18, ry + 34), brTextMuted_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+                           D2D1::RectF(cx0 + 220, ry + 11, cx0 + cw - 18, ry + 29), brTextMuted_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
             hitRects_.push_back({ slotKinds[i], rr, false, -1 });
         }
     }
 
-    // Actions & Storage Card (y = 284..486)
-    D2D1_RECT_F actR = D2D1::RectF(cx0, 284, cx0 + cw, 488);
+    // One-Click Starter Presets (y = 244..314)
+    {
+        std::wstring qTitle = L"One-Click Starter Presets (Apply to Profile " + std::to_wstring(presetSlot_) + L")";
+        rt_->DrawTextW(qTitle.c_str(), static_cast<UINT32>(qTitle.size()), fmtSection_.Get(),
+                       D2D1::RectF(cx0, 244, cx0 + cw, 264), brText_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+
+        const HubControlKind qKinds[5] = {
+            HUB_PRESET_QUICK_0, HUB_PRESET_QUICK_1, HUB_PRESET_QUICK_2, HUB_PRESET_QUICK_3, HUB_PRESET_QUICK_4
+        };
+        const wchar_t* qSubs[5] = { L"Balanced", L"AgX + Bloom", L"FPS Clarity", L"Vivid Color", L"Warm Night" };
+        const float qGap = 10.0f;
+        const float qW = (cw - qGap * 4.0f) / 5.0f;
+        if (fmtSmall_) fmtSmall_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+        for (int i = 0; i < 5; ++i) {
+            float qx = cx0 + static_cast<float>(i) * (qW + qGap);
+            D2D1_RECT_F qr = D2D1::RectF(qx, 268, qx + qW, 314);
+            rt_->FillRoundedRectangle(D2D1::RoundedRect(qr, 7, 7), brCard_.Get());
+            rt_->DrawRoundedRectangle(D2D1::RoundedRect(qr, 7, 7), brBorder_.Get(), 1.0f);
+
+            const wchar_t* qName = GetCuratedPresetName(i);
+            rt_->DrawTextW(qName, static_cast<UINT32>(wcslen(qName)), fmtCenter_.Get(),
+                           D2D1::RectF(qx + 4, 272, qx + qW - 4, 293), brText_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+            rt_->DrawTextW(qSubs[i], static_cast<UINT32>(wcslen(qSubs[i])), fmtSmall_.Get(),
+                           D2D1::RectF(qx + 4, 293, qx + qW - 4, 310), brTextMuted_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+            hitRects_.push_back({ qKinds[i], qr, false, -1 });
+        }
+        if (fmtSmall_) fmtSmall_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+    }
+
+    // Actions & Storage Card (y = 326..518)
+    D2D1_RECT_F actR = D2D1::RectF(cx0, 326, cx0 + cw, 518);
     rt_->FillRoundedRectangle(D2D1::RoundedRect(actR, 10, 10), brCard_.Get());
     rt_->DrawRoundedRectangle(D2D1::RoundedRect(actR, 10, 10), brBorder_.Get(), 1.0f);
 
     std::wstring mTitle = L"Manage Profile " + std::to_wstring(presetSlot_);
     rt_->DrawTextW(mTitle.c_str(), static_cast<UINT32>(mTitle.size()), fmtSection_.Get(),
-                   D2D1::RectF(cx0 + 20, 300, cx0 + cw - 20, 322), brText_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+                   D2D1::RectF(cx0 + 20, 338, cx0 + cw - 20, 358), brText_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
 
     std::wstring dataPath = L"Config Folder: " + GetExeDirectory().wstring();
     rt_->DrawTextW(dataPath.c_str(), static_cast<UINT32>(dataPath.size()), fmtSmall_.Get(),
-                   D2D1::RectF(cx0 + 20, 324, cx0 + cw - 20, 344), brTextMuted_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+                   D2D1::RectF(cx0 + 20, 360, cx0 + cw - 20, 378), brTextMuted_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
 
     float mw = cw - 40.0f;
     float w2 = (mw - 12.0f) * 0.5f;
     DrawFlatButton(HUB_BTN_PRESET_EXPORT, L"Export Profile " + std::to_wstring(presetSlot_) + L" (.json)...",
-                   D2D1::RectF(cx0 + 20, 356, cx0 + 20 + w2, 394), true);
+                   D2D1::RectF(cx0 + 20, 388, cx0 + 20 + w2, 424), true);
     DrawFlatButton(HUB_BTN_PRESET_IMPORT, L"Import into Profile " + std::to_wstring(presetSlot_) + L" (.json)...",
-                   D2D1::RectF(cx0 + 20 + w2 + 12.0f, 356, cx0 + cw - 20, 394), false);
+                   D2D1::RectF(cx0 + 20 + w2 + 12.0f, 388, cx0 + cw - 20, 424), false);
 
-    float w3 = (mw - 24.0f) / 3.0f;
+    float g4 = 10.0f;
+    float w4 = (mw - g4 * 3.0f) / 4.0f;
     DrawFlatButton(HUB_BTN_OPEN_DATA_FOLDER, L"Open Data Folder",
-                   D2D1::RectF(cx0 + 20, 408, cx0 + 20 + w3, 444), false);
+                   D2D1::RectF(cx0 + 20, 434, cx0 + 20 + w4, 468), false);
+    DrawFlatButton(HUB_BTN_OPEN_SCREENSHOTS, L"Open Screenshots",
+                   D2D1::RectF(cx0 + 20 + (w4 + g4), 434, cx0 + 20 + (w4 + g4) + w4, 468), false);
     DrawFlatButton(HUB_BTN_RESET_PROFILE, L"Reset Profile " + std::to_wstring(presetSlot_),
-                   D2D1::RectF(cx0 + 20 + w3 + 12.0f, 408, cx0 + 20 + w3 * 2 + 12.0f, 444), false);
-    DrawFlatButton(HUB_BTN_RESET_ALL, L"Reset All Profiles",
-                   D2D1::RectF(cx0 + 20 + (w3 + 12.0f) * 2.0f, 408, cx0 + cw - 20, 444), false, true);
+                   D2D1::RectF(cx0 + 20 + (w4 + g4) * 2.0f, 434, cx0 + 20 + (w4 + g4) * 2.0f + w4, 468), false);
+    DrawFlatButton(HUB_BTN_RESET_ALL, L"Reset All",
+                   D2D1::RectF(cx0 + 20 + (w4 + g4) * 3.0f, 434, cx0 + cw - 20, 468), false, true);
 
     rt_->DrawTextW(presetStatus_.c_str(), static_cast<UINT32>(presetStatus_.size()), fmtSmall_.Get(),
-                   D2D1::RectF(cx0 + 20, 456, cx0 + cw - 20, 480),
+                   D2D1::RectF(cx0 + 20, 480, cx0 + cw - 20, 506),
                    presetStatusError_ ? brDanger_.Get() : brTextMuted_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
 }
 
@@ -917,7 +1277,7 @@ void ControlHub::RenderLegacyTab() {
             brTextMuted_.Get());
     DrawFlatButton(HUB_BTN_RS_BROWSE, L"Browse...", D2D1::RectF(mx + mw - 104, 174, mx + mw, 208), false);
 
-    DrawTxt(rt_.Get(), L"Export Preset Source (12 filters synced)", fmtBody_.Get(),
+    DrawTxt(rt_.Get(), L"Export Preset Source (16 filters synced)", fmtBody_.Get(),
             D2D1::RectF(mx, 224, mx + mw, 244), brTextMuted_.Get());
 
     int m2Prof = std::clamp(config_->mode2ExportProfile, 1, 3);
@@ -961,7 +1321,7 @@ void ControlHub::RenderLegacyTab() {
 
     DrawTxt(rt_.Get(), L"Legacy Fullscreen Shader (Optional)", fmtSection_.Get(),
             D2D1::RectF(i2.left + 16, i2.top + 14, i2.right - 16, i2.top + 36), brText_.Get());
-    DrawTxt(rt_.Get(), L"Exports all 12 calibrated shader modules directly into ReShade for classic DX9, DX10, and OpenGL titles.", fmtSmall_.Get(),
+    DrawTxt(rt_.Get(), L"Exports all 16 calibrated shader modules directly into ReShade for classic DX9, DX10, and OpenGL titles.", fmtSmall_.Get(),
             D2D1::RectF(i2.left + 16, i2.top + 40, i2.right - 16, i2.bottom - 12), brTextMuted_.Get());
 }
 
@@ -983,9 +1343,9 @@ void ControlHub::RenderAboutTab() {
     D2D1_RECT_F verBadge = D2D1::RectF(cx0 + 364, 90, cx0 + 426, 112);
     rt_->FillRoundedRectangle(D2D1::RoundedRect(verBadge, 5, 5), brAccentSoft_.Get());
     rt_->DrawRoundedRectangle(D2D1::RoundedRect(verBadge, 5, 5), brAccent_.Get(), 1.0f);
-    DrawTxt(rt_.Get(), L"v1.0.0", fmtCenter_.Get(), verBadge, brText_.Get());
+    DrawTxt(rt_.Get(), L"v2.0.0", fmtCenter_.Get(), verBadge, brText_.Get());
 
-    DrawTxt(rt_.Get(), L"Developed by arthurj119  \u2022  MIT Open-Source License  \u2022  Cross-GPU Game Visual Enhancer",
+    DrawTxt(rt_.Get(), L"Developed by arthurj119  \u2022  MIT Open Source License  \u2022  Cross GPU Game Visual, Scaling & FG Suite",
             fmtBody_.Get(), D2D1::RectF(cx0 + 82, 120, cx0 + cw - 196, 144), brTextMuted_.Get());
 
     DrawFlatButton(HUB_BTN_GITHUB, L"GitHub Repository",
@@ -1009,11 +1369,11 @@ void ControlHub::RenderAboutTab() {
     };
     const DetailRow details[7] = {
         { L"Application",    L"AI Dynamic Vibrance Enhance" },
-        { L"Version",        L"v1.0.0" },
+        { L"Version",        L"v2.0.0" },
         { L"Developer",      L"arthurj119" },
-        { L"License",        L"MIT Open-Source" },
-        { L"Render Engine",  L"Direct3D 11 HLSL + DirectComposition" },
-        { L"Shader Modules", L"12 Calibrated Filters (Oklab & CAS)" },
+        { L"License",        L"MIT Open Source" },
+        { L"Render Engine",  L"DX11 HLSL + DirectComposition (SDR, scRGB HDR & Optical Flow)" },
+        { L"Shader Modules", L"16 Visual Filters + 4 Spatial Scalers + Multi-Scale FG" },
         { L"GPU Support",    L"AMD Radeon / NVIDIA GeForce / Intel" },
     };
     for (int i = 0; i < 7; ++i) {
@@ -1033,13 +1393,13 @@ void ControlHub::RenderAboutTab() {
 
     std::wstring thankYouBody =
         L"Thank you for using AI Dynamic Vibrance Enhance.\n\n"
-        L"This project was created to bring open-source, hardware-agnostic color vibrancy, dark-area visibility, "
-        L"and perceptual clarity to every PC gamer\u2014without proprietary driver lock-in or heavy GPU overhead.\n\n"
+        L"This project was created to bring open source, hardware agnostic color vibrancy, dark area visibility, "
+        L"True HDR10 highlight expansion, and perceptual clarity to every PC gamer without proprietary driver lock in or heavy GPU overhead.\n\n"
         L"We truly appreciate your support, feedback, custom presets, and community testing across AMD, NVIDIA, and Intel GPUs.";
     DrawTxt(rt_.Get(), thankYouBody, fmtBody_.Get(),
             D2D1::RectF(rightCard.left + 20, 248, rightCard.right - 20, 434), brTextMuted_.Get());
 
-    DrawTxt(rt_.Get(), L"\u2014 arthurj119", fmtSection_.Get(),
+    DrawTxt(rt_.Get(), L"by arthurj119", fmtSection_.Get(),
             D2D1::RectF(rightCard.left + 20, 444, rightCard.right - 20, 472), brAccent_.Get());
 }
 
@@ -1055,10 +1415,11 @@ void ControlHub::Render() {
 
     switch (currentTab_) {
         case 0: RenderOverviewTab(); break;
-        case 1: RenderGamesTab();    break;
-        case 2: RenderPresetsTab();  break;
-        case 3: RenderLegacyTab();   break;
-        case 4: RenderAboutTab();    break;
+        case 1: RenderScalingTab();  break;
+        case 2: RenderGamesTab();    break;
+        case 3: RenderPresetsTab();  break;
+        case 4: RenderLegacyTab();   break;
+        case 5: RenderAboutTab();    break;
         default: RenderOverviewTab(); break;
     }
 
@@ -1071,12 +1432,31 @@ void ControlHub::Render() {
     }
 }
 
-void ControlHub::UpdateSplitSliderFromX(float dipX, const D2D1_RECT_F& trackRect) {
+void ControlHub::UpdateHubSliderFromX(HubControlKind kind, float dipX, const D2D1_RECT_F& trackRect) {
     if (!config_) return;
     float left = trackRect.left + 4.0f;
     float right = trackRect.right - 4.0f;
-    float norm = std::clamp((dipX - left) / std::max(right - left, 1.0f), 0.05f, 0.95f);
-    config_->splitPosition = norm;
+    float norm = std::clamp((dipX - left) / std::max(right - left, 1.0f), 0.0f, 1.0f);
+    switch (kind) {
+        case HUB_SLIDER_SPLITPOS:
+            config_->splitPosition = std::clamp(norm, 0.05f, 0.95f);
+            break;
+        case HUB_SLIDER_SCALE_SHARP:
+            config_->scaleSharpness = std::clamp(static_cast<int>(std::lround(norm * 100.0f)), 0, 100);
+            break;
+        case HUB_SLIDER_FG_FLOWSCALE: {
+            int val = 25 + static_cast<int>(std::lround(norm * 15.0f)) * 5;
+            config_->fgFlowScale = std::clamp(val, 25, 100);
+            break;
+        }
+        case HUB_SLIDER_FG_TARGETFPS: {
+            int val = 60 + static_cast<int>(std::lround(norm * 36.0f)) * 5;
+            config_->fgAdaptiveTargetFps = std::clamp(val, 60, 240);
+            break;
+        }
+        default:
+            break;
+    }
     Render();
     if (callbacks_.onConfigChanged) callbacks_.onConfigChanged();
 }
@@ -1087,9 +1467,13 @@ void ControlHub::SetRecordingHotkey(int target) {
     if (recordingHotkey_ == target) return;
     recordingHotkey_ = target;
     if (nowRecording) {
-        hotkeyStatus_ = (target == 1)
-            ? L"Press new key combo for Filter Sidebar (e.g. Alt + F3, F9). Esc cancels."
-            : L"Press new key combo for Quick Filter Toggle (e.g. Alt + V, F10). Esc cancels.";
+        if (target == 1) {
+            hotkeyStatus_ = L"Press new key combo for Filter Sidebar (e.g. Alt + F3, F9). Esc cancels.";
+        } else if (target == 2) {
+            hotkeyStatus_ = L"Press new key combo for Quick Filter Toggle (e.g. Alt + V, F10). Esc cancels.";
+        } else {
+            hotkeyStatus_ = L"Press new key combo for Filtered Screenshot (e.g. Alt + F12, F11). Esc cancels.";
+        }
         hotkeyStatusError_ = false;
     }
     if (wasRecording != nowRecording && callbacks_.onHotkeyCaptureChanged) {
@@ -1129,10 +1513,12 @@ void ControlHub::HandleHotkeyKeyDown(UINT vk) {
         return;
     }
 
-    uint32_t otherMods = (recordingHotkey_ == 1) ? config_->quickToggleMods : config_->sidebarHotkeyMods;
-    uint32_t otherVk   = (recordingHotkey_ == 1) ? config_->quickToggleVk   : config_->sidebarHotkeyVk;
-    if (mods == otherMods && vk == otherVk) {
-        hotkeyStatus_ = L"That shortcut is already assigned to the other action.";
+    bool collision = false;
+    if (recordingHotkey_ != 1 && mods == config_->sidebarHotkeyMods && vk == config_->sidebarHotkeyVk) collision = true;
+    if (recordingHotkey_ != 2 && mods == config_->quickToggleMods && vk == config_->quickToggleVk) collision = true;
+    if (recordingHotkey_ != 3 && mods == config_->screenshotHotkeyMods && vk == config_->screenshotHotkeyVk) collision = true;
+    if (collision) {
+        hotkeyStatus_ = L"That shortcut is already assigned to another action.";
         hotkeyStatusError_ = true;
         Render();
         return;
@@ -1142,11 +1528,15 @@ void ControlHub::HandleHotkeyKeyDown(UINT vk) {
         config_->sidebarHotkeyMods = mods;
         config_->sidebarHotkeyVk = vk;
         hotkeyStatus_ = L"Updated Filter Sidebar hotkey to " + FormatHotkeyString(mods, vk) + L".";
-    } else {
+    } else if (recordingHotkey_ == 2) {
         config_->quickToggleMods = mods;
         config_->quickToggleVk = vk;
         config_->quickToggleEnabled = true;
         hotkeyStatus_ = L"Updated Quick Filter hotkey to " + FormatHotkeyString(mods, vk) + L".";
+    } else {
+        config_->screenshotHotkeyMods = mods;
+        config_->screenshotHotkeyVk = vk;
+        hotkeyStatus_ = L"Updated Filtered Screenshot hotkey to " + FormatHotkeyString(mods, vk) + L".";
     }
     hotkeyStatusError_ = false;
     SetRecordingHotkey(0);
@@ -1155,6 +1545,13 @@ void ControlHub::HandleHotkeyKeyDown(UINT vk) {
 
 void ControlHub::OpenDataFolder() {
     std::wstring dir = GetExeDirectory().wstring();
+    ShellExecuteW(hwnd_, L"open", dir.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+}
+
+void ControlHub::OpenScreenshotsFolder() {
+    std::filesystem::path dir = GetScreenshotsDirectory();
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
     ShellExecuteW(hwnd_, L"open", dir.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
 }
 
@@ -1313,8 +1710,13 @@ void ControlHub::PickReShadeFolder() {
                 if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &path)) && path) {
                     config_->reshadeFolder = path;
                     CoTaskMemFree(path);
-                    reshadeStatus_ = L"Folder selected. Click 'Install / Update .fx' to deploy shader.";
-                    reshadeStatusError_ = false;
+                    if (DetectReShadeInFolder(config_->reshadeFolder)) {
+                        reshadeStatus_ = L"ReShade detected! Click 'Install / Update .fx' to deploy shader.";
+                        reshadeStatusError_ = false;
+                    } else {
+                        reshadeStatus_ = L"Warning: ReShade not detected in this folder. Install ReShade (reshade.me) to this game first.";
+                        reshadeStatusError_ = true;
+                    }
                     Render();
                     if (callbacks_.onConfigChanged) callbacks_.onConfigChanged();
                     return;
@@ -1332,20 +1734,23 @@ void ControlHub::HandleMouseDown(float dipX, float dipY) {
             if (hr.isSlider) {
                 SetRecordingHotkey(0);
                 draggingSlider_ = true;
+                activeSliderKind_ = hr.kind;
                 activeTrackRect_ = hr.rect;
                 SetCapture(hwnd_);
-                UpdateSplitSliderFromX(dipX, hr.rect);
+                UpdateHubSliderFromX(hr.kind, dipX, hr.rect);
                 return;
             }
-            if (hr.kind != HUB_BTN_HOTKEY_SIDEBAR && hr.kind != HUB_BTN_HOTKEY_QUICK && recordingHotkey_ != 0) {
+            if (hr.kind != HUB_BTN_HOTKEY_SIDEBAR && hr.kind != HUB_BTN_HOTKEY_QUICK &&
+                hr.kind != HUB_BTN_HOTKEY_SCREENSHOT && recordingHotkey_ != 0) {
                 SetRecordingHotkey(0);
             }
             switch (hr.kind) {
                 case HUB_TAB_OVERVIEW: currentTab_ = 0; Render(); return;
-                case HUB_TAB_GAMES:    currentTab_ = 1; Render(); return;
-                case HUB_TAB_PRESETS:  currentTab_ = 2; Render(); return;
-                case HUB_TAB_LEGACY:   currentTab_ = 3; Render(); return;
-                case HUB_TAB_ABOUT:    currentTab_ = 4; Render(); return;
+                case HUB_TAB_SCALING:  currentTab_ = 1; Render(); return;
+                case HUB_TAB_GAMES:    currentTab_ = 2; Render(); return;
+                case HUB_TAB_PRESETS:  currentTab_ = 3; Render(); return;
+                case HUB_TAB_LEGACY:   currentTab_ = 4; Render(); return;
+                case HUB_TAB_ABOUT:    currentTab_ = 5; Render(); return;
 
                 case HUB_VIEW_GRID:
                     if (config_->hubListView) {
@@ -1384,6 +1789,9 @@ void ControlHub::HandleMouseDown(float dipX, float dipY) {
                 case HUB_BTN_HOTKEY_QUICK:
                     SetRecordingHotkey(recordingHotkey_ == 2 ? 0 : 2);
                     return;
+                case HUB_BTN_HOTKEY_SCREENSHOT:
+                    SetRecordingHotkey(recordingHotkey_ == 3 ? 0 : 3);
+                    return;
                 case HUB_BTN_HOTKEY_RESET:
                     SetRecordingHotkey(0);
                     config_->sidebarHotkeyMods = MOD_ALT;
@@ -1391,7 +1799,9 @@ void ControlHub::HandleMouseDown(float dipX, float dipY) {
                     config_->quickToggleMods = MOD_ALT;
                     config_->quickToggleVk = 'V';
                     config_->quickToggleEnabled = true;
-                    hotkeyStatus_ = L"Reset hotkeys to defaults (Alt + X and Alt + V).";
+                    config_->screenshotHotkeyMods = MOD_ALT;
+                    config_->screenshotHotkeyVk = VK_F12;
+                    hotkeyStatus_ = L"Reset hotkeys to defaults (Alt + X, Alt + V, and Alt + F12).";
                     hotkeyStatusError_ = false;
                     Render();
                     if (callbacks_.onConfigChanged) callbacks_.onConfigChanged();
@@ -1471,14 +1881,35 @@ void ControlHub::HandleMouseDown(float dipX, float dipY) {
                     presetSlot_ = static_cast<int>(hr.kind - HUB_PRESET_SLOT_1) + 1;
                     Render();
                     return;
+                case HUB_PRESET_QUICK_0:
+                case HUB_PRESET_QUICK_1:
+                case HUB_PRESET_QUICK_2:
+                case HUB_PRESET_QUICK_3:
+                case HUB_PRESET_QUICK_4: {
+                    int idx = static_cast<int>(hr.kind - HUB_PRESET_QUICK_0);
+                    int slot = std::clamp(presetSlot_, 1, 3);
+                    config_->profiles[slot - 1] = BuildCuratedPreset(idx);
+                    presetStatus_ = L"Applied '" + std::wstring(GetCuratedPresetName(idx)) +
+                                    L"' preset to Profile " + std::to_wstring(slot) + L".";
+                    presetStatusError_ = false;
+                    Render();
+                    if (callbacks_.onConfigChanged) callbacks_.onConfigChanged();
+                    return;
+                }
                 case HUB_BTN_PRESET_EXPORT:
                     ExportPresetWithDialog();
                     return;
                 case HUB_BTN_PRESET_IMPORT:
                     ImportPresetWithDialog();
                     return;
+                case HUB_BTN_SCREENSHOT:
+                    if (callbacks_.onScreenshotRequested) callbacks_.onScreenshotRequested();
+                    return;
                 case HUB_BTN_OPEN_DATA_FOLDER:
                     OpenDataFolder();
+                    return;
+                case HUB_BTN_OPEN_SCREENSHOTS:
+                    OpenScreenshotsFolder();
                     return;
                 case HUB_BTN_RESET_PROFILE: {
                     int slot = std::clamp(presetSlot_, 1, 3);
@@ -1535,8 +1966,13 @@ void ControlHub::HandleMouseDown(float dipX, float dipY) {
                     std::wstring installedPath, err;
                     if (InstallReShadeShader(config_->reshadeFolder, config_->profiles[profIdx], installedPath, err)) {
                         config_->mode2Enabled = true;
-                        reshadeStatus_ = L"Installed Profile " + std::to_wstring(profIdx + 1) + L": " + installedPath;
-                        reshadeStatusError_ = false;
+                        if (DetectReShadeInFolder(config_->reshadeFolder)) {
+                            reshadeStatus_ = L"Installed Profile " + std::to_wstring(profIdx + 1) + L" into ReShade: " + installedPath;
+                            reshadeStatusError_ = false;
+                        } else {
+                            reshadeStatus_ = L"Exported .fx, but ReShade was NOT detected here! Install ReShade to this game first, then re-click Install.";
+                            reshadeStatusError_ = true;
+                        }
                         Render();
                         if (callbacks_.onConfigChanged) callbacks_.onConfigChanged();
                     } else {
@@ -1558,6 +1994,61 @@ void ControlHub::HandleMouseDown(float dipX, float dipY) {
                     ShellExecuteW(hwnd_, L"open", L"https://github.com/arthurj119/AI-Dynamic-Vibrance-Enhance",
                                   nullptr, nullptr, SW_SHOWNORMAL);
                     return;
+
+                case HUB_SCALE_OFF:
+                case HUB_SCALE_FSR1:
+                case HUB_SCALE_NIS:
+                case HUB_SCALE_INTEGER:
+                case HUB_SCALE_ANIME4K:
+                    config_->scaleMode = static_cast<int>(hr.kind - HUB_SCALE_OFF);
+                    Render();
+                    if (callbacks_.onConfigChanged) callbacks_.onConfigChanged();
+                    return;
+                case HUB_TOGGLE_SCALE_STRETCH:
+                    config_->scaleFullscreenStretch = !config_->scaleFullscreenStretch;
+                    Render();
+                    if (callbacks_.onConfigChanged) callbacks_.onConfigChanged();
+                    return;
+
+                case HUB_FG_OFF:
+                case HUB_FG_2X:
+                case HUB_FG_3X:
+                case HUB_FG_4X:
+                case HUB_FG_ADAPTIVE:
+                    config_->fgMode = static_cast<int>(hr.kind - HUB_FG_OFF);
+                    Render();
+                    if (callbacks_.onConfigChanged) callbacks_.onConfigChanged();
+                    return;
+                case HUB_TOGGLE_FG_FALLBACK:
+                    config_->fgFastMotionFallback = !config_->fgFastMotionFallback;
+                    Render();
+                    if (callbacks_.onConfigChanged) callbacks_.onConfigChanged();
+                    return;
+                case HUB_TOGGLE_FG_HUDPROTECT:
+                    config_->fgStaticHudProtect = !config_->fgStaticHudProtect;
+                    Render();
+                    if (callbacks_.onConfigChanged) callbacks_.onConfigChanged();
+                    return;
+
+                case HUB_CAPTURE_DXGI:
+                    if (config_->captureApi != CAPTURE_DXGI) {
+                        config_->captureApi = CAPTURE_DXGI;
+                        Render();
+                        if (callbacks_.onConfigChanged) callbacks_.onConfigChanged();
+                    }
+                    return;
+                case HUB_CAPTURE_WGC:
+                    if (config_->captureApi != CAPTURE_WGC) {
+                        config_->captureApi = CAPTURE_WGC;
+                        Render();
+                        if (callbacks_.onConfigChanged) callbacks_.onConfigChanged();
+                    }
+                    return;
+                case HUB_TOGGLE_ALLOW_TEARING:
+                    config_->allowTearing = !config_->allowTearing;
+                    Render();
+                    if (callbacks_.onConfigChanged) callbacks_.onConfigChanged();
+                    return;
                 default:
                     break;
             }
@@ -1571,7 +2062,7 @@ void ControlHub::HandleMouseDown(float dipX, float dipY) {
 void ControlHub::HandleMouseMove(float dipX, float dipY) {
     (void)dipY;
     if (draggingSlider_) {
-        UpdateSplitSliderFromX(dipX, activeTrackRect_);
+        UpdateHubSliderFromX(activeSliderKind_, dipX, activeTrackRect_);
     }
 }
 

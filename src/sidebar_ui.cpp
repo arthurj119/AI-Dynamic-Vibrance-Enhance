@@ -133,7 +133,7 @@ bool SidebarUI::CreateRenderResources() {
 
     HRESULT hr = d2dFactory_->CreateHwndRenderTarget(
         rtp,
-        D2D1::HwndRenderTargetProperties(hwnd_, sz, D2D1_PRESENT_OPTIONS_NONE),
+        D2D1::HwndRenderTargetProperties(hwnd_, sz, D2D1_PRESENT_OPTIONS_IMMEDIATELY),
         &rt_
     );
     if (FAILED(hr)) return false;
@@ -168,6 +168,28 @@ void SidebarUI::DiscardRenderResources() {
 void SidebarUI::SetAdapterName(const std::wstring& adapterName) {
     adapterName_ = adapterName.empty() ? L"Universal GPU" : adapterName;
     Invalidate();
+}
+
+void SidebarUI::SetDisplayHdrInfo(const DisplayHdrInfo& info) {
+    if (info.hdrActive == displayHdr_.hdrActive &&
+        std::abs(info.maxLuminanceNits - displayHdr_.maxLuminanceNits) < 1.0f &&
+        std::abs(info.sdrWhiteNits - displayHdr_.sdrWhiteNits) < 1.0f) {
+        return;
+    }
+    displayHdr_ = info;
+    Invalidate();
+}
+
+void SidebarUI::SetTelemetry(const FrameGenTelemetry& tel) {
+    bool changed = (tel.fgRunning != telemetry_.fgRunning) ||
+                   (tel.monitorHz != telemetry_.monitorHz) ||
+                   (std::abs(tel.sourceFps - telemetry_.sourceFps) >= 1.0f) ||
+                   (std::abs(tel.outputFps - telemetry_.outputFps) >= 1.0f);
+    if (!changed) return;
+    telemetry_ = tel;
+    if (IsVisible()) {
+        Invalidate();
+    }
 }
 
 void SidebarUI::SetActiveAppInfo(const std::wstring& exeName, const std::wstring& displayTitle, bool isGame, const std::wstring& engineTag) {
@@ -322,10 +344,11 @@ void SidebarUI::Render() {
         addHit(k, pr);
     };
 
-    auto drawSlider = [&](ControlKind k, const std::wstring& label, int val, float sx, float& sy, float sw, bool showCenterTick = false) {
-        drawText(label, fmtBody_.Get(), D2D1::RectF(sx, sy, sx + sw - 46, sy + 20), brText_.Get());
+    auto drawRangeSlider = [&](ControlKind k, const std::wstring& label, int val, int minVal, int maxVal,
+                               float sx, float& sy, float sw, bool showCenterTick = false, float numBoxW = 42.0f) {
+        drawText(label, fmtBody_.Get(), D2D1::RectF(sx, sy, sx + sw - numBoxW - 6.0f, sy + 20), brText_.Get());
 
-        D2D1_RECT_F numR = D2D1::RectF(sx + sw - 42, sy, sx + sw, sy + 20);
+        D2D1_RECT_F numR = D2D1::RectF(sx + sw - numBoxW, sy, sx + sw, sy + 20);
         rt_->FillRoundedRectangle(D2D1::RoundedRect(numR, 4, 4), brBg_.Get());
         rt_->DrawRoundedRectangle(D2D1::RoundedRect(numR, 4, 4), brBorder_.Get(), 1.0f);
         drawText(std::to_wstring(val), fmtCenter_.Get(), numR, brText_.Get());
@@ -334,7 +357,8 @@ void SidebarUI::Render() {
         D2D1_RECT_F track = D2D1::RectF(sx, sy + 7.0f, sx + sw, sy + 11.0f);
         rt_->FillRoundedRectangle(D2D1::RoundedRect(track, 2, 2), brTrackBg_.Get());
 
-        float norm = static_cast<float>(std::clamp(val, 0, 100)) / 100.0f;
+        int span = std::max(maxVal - minVal, 1);
+        float norm = static_cast<float>(std::clamp(val, minVal, maxVal) - minVal) / static_cast<float>(span);
         float fillX = track.left + (track.right - track.left) * norm;
         D2D1_RECT_F fillR = D2D1::RectF(track.left, track.top, fillX, track.bottom);
         rt_->FillRoundedRectangle(D2D1::RoundedRect(fillR, 2, 2), brAccent_.Get());
@@ -349,6 +373,10 @@ void SidebarUI::Render() {
 
         addHit(k, D2D1::RectF(sx - 6, sy - 2, sx + sw + 6, sy + 20), true);
         sy += 28.0f;
+    };
+
+    auto drawSlider = [&](ControlKind k, const std::wstring& label, int val, float sx, float& sy, float sw, bool showCenterTick = false) {
+        drawRangeSlider(k, label, val, 0, 100, sx, sy, sw, showCenterTick, 42.0f);
     };
 
     auto drawFilterCardHeader = [&](const std::wstring& title, const std::wstring& sub, bool enabled,
@@ -387,7 +415,103 @@ void SidebarUI::Render() {
     }
     y += 56.0f;
 
-    // Filter Sidebar stays focused cleanly on Profiles + 12 Filters (settings live in Control Hub)
+    // Compact Quick-Switch Scaling & Frame Gen Card
+    {
+        float cardH = 112.0f;
+        bool activeEng = (config_->scaleMode != SCALE_OFF || config_->fgMode != FG_OFF);
+        D2D1_RECT_F sCard = D2D1::RectF(pad, y, pad + cardW, y + cardH);
+        rt_->FillRoundedRectangle(D2D1::RoundedRect(sCard, 8, 8), brCard_.Get());
+        rt_->DrawRoundedRectangle(D2D1::RoundedRect(sCard, 8, 8), activeEng ? brAccent_.Get() : brBorder_.Get(), 1.0f);
+
+        float cy = y + 10.0f;
+        drawText(L"Scaling & Frame Gen", fmtSection_.Get(), D2D1::RectF(mx, cy, mx + 175.0f, cy + 20.0f), brText_.Get());
+        std::wstring fpsBadge = (telemetry_.fgRunning && telemetry_.outputFps > 1.0f)
+            ? (std::to_wstring(static_cast<int>(std::lround(telemetry_.sourceFps))) + L" -> " + std::to_wstring(static_cast<int>(std::lround(telemetry_.outputFps))) + L" FPS")
+            : L"Full settings in Hub";
+        drawText(fpsBadge, fmtSmall_.Get(), D2D1::RectF(mx + 180.0f, cy + 2.0f, mx + mw, cy + 18.0f),
+                 telemetry_.fgRunning ? brAccent_.Get() : brTextMuted_.Get());
+        cy += 24.0f;
+
+        auto drawCompactRow = [&](const wchar_t* rowLabel, const wchar_t* const btnLabels[5], ControlKind baseKind, int curVal) {
+            drawText(rowLabel, fmtSmall_.Get(), D2D1::RectF(mx, cy + 5.0f, mx + 64.0f, cy + 23.0f), brTextMuted_.Get());
+            float rx = mx + 66.0f;
+            float rw = mw - 66.0f;
+            float bgap = 4.0f;
+            float bw = (rw - bgap * 4.0f) / 5.0f;
+            for (int i = 0; i < 5; ++i) {
+                float bx = rx + static_cast<float>(i) * (bw + bgap);
+                D2D1_RECT_F br = D2D1::RectF(bx, cy, bx + bw, cy + 26.0f);
+                bool sel = (curVal == i);
+                rt_->FillRoundedRectangle(D2D1::RoundedRect(br, 4, 4), sel ? brAccentSoft_.Get() : brBg_.Get());
+                rt_->DrawRoundedRectangle(D2D1::RoundedRect(br, 4, 4), sel ? brAccent_.Get() : brBorder_.Get(), sel ? 1.4f : 1.0f);
+                drawText(btnLabels[i], fmtCenter_.Get(), br, sel ? brText_.Get() : brTextMuted_.Get());
+                addHit(static_cast<ControlKind>(static_cast<int>(baseKind) + i), br);
+            }
+            cy += 34.0f;
+        };
+
+        const wchar_t* upLabels[5] = { L"Off", L"FSR", L"NIS", L"Int", L"A4K" };
+        const wchar_t* fgLabels[5] = { L"Off", L"2x", L"3x", L"4x", L"Auto" };
+        drawCompactRow(L"Upscaler", upLabels, CTRL_SB_SCALE_0, config_->scaleMode);
+        drawCompactRow(L"Frame Gen", fgLabels, CTRL_SB_FG_0, config_->fgMode);
+        y += cardH + 10.0f;
+    }
+
+    // Split Preview Card (Live In-Game Before / After Compare + Quick Resize)
+    {
+        bool splitOn = config_->splitPreview;
+        float sCardH = splitOn ? 96.0f : 54.0f;
+        D2D1_RECT_F spCard = D2D1::RectF(pad, y, pad + cardW, y + sCardH);
+        rt_->FillRoundedRectangle(D2D1::RoundedRect(spCard, 8, 8), brCard_.Get());
+        rt_->DrawRoundedRectangle(D2D1::RoundedRect(spCard, 8, 8), splitOn ? brAccent_.Get() : brBorder_.Get(), 1.0f);
+
+        float cy = y + 10.0f;
+        if (!splitOn) {
+            drawText(L"Split Preview", fmtBody_.Get(), D2D1::RectF(mx, cy - 1.0f, mx + mw - 46.0f, cy + 17.0f), brText_.Get());
+            drawText(L"Compare original vs filtered (Alt+[ / ])", fmtSmall_.Get(), D2D1::RectF(mx, cy + 17.0f, mx + mw - 46.0f, cy + 35.0f), brTextMuted_.Get());
+            drawTogglePill(CTRL_SB_TOGGLE_SPLIT, mx + mw - 36.0f, y + 18.0f, false);
+        } else {
+            drawText(L"Split Preview", fmtSection_.Get(), D2D1::RectF(mx, cy, mx + mw - 46.0f, cy + 20.0f), brAccent_.Get());
+            drawTogglePill(CTRL_SB_TOGGLE_SPLIT, mx + mw - 36.0f, cy + 2.0f, true);
+
+            float rowY = y + 38.0f;
+            D2D1_RECT_F decR = D2D1::RectF(mx, rowY, mx + 26.0f, rowY + 24.0f);
+            rt_->FillRoundedRectangle(D2D1::RoundedRect(decR, 4, 4), brBg_.Get());
+            rt_->DrawRoundedRectangle(D2D1::RoundedRect(decR, 4, 4), brBorder_.Get(), 1.0f);
+            drawText(L"-", fmtCenter_.Get(), decR, brText_.Get());
+            addHit(CTRL_SB_SPLIT_DEC, decR);
+
+            float sLeft = mx + 34.0f;
+            float sRight = mx + mw - 76.0f;
+            D2D1_RECT_F track = D2D1::RectF(sLeft, rowY + 10.0f, sRight, rowY + 14.0f);
+            rt_->FillRoundedRectangle(D2D1::RoundedRect(track, 2, 2), brTrackBg_.Get());
+            float norm = std::clamp(config_->splitPosition, 0.05f, 0.95f);
+            float fillX = track.left + (track.right - track.left) * norm;
+            rt_->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(track.left, track.top, fillX, track.bottom), 2, 2), brAccent_.Get());
+            float midX = (track.left + track.right) * 0.5f;
+            rt_->DrawLine(D2D1::Point2F(midX, track.top - 3.0f), D2D1::Point2F(midX, track.bottom + 3.0f), brBorder_.Get(), 1.0f);
+            rt_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(fillX, rowY + 12.0f), 7.0f, 7.0f), brText_.Get());
+            rt_->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(fillX, rowY + 12.0f), 7.0f, 7.0f), brAccent_.Get(), 2.0f);
+            addHit(CTRL_SB_SLIDER_SPLIT, D2D1::RectF(sLeft - 6.0f, rowY, sRight + 6.0f, rowY + 24.0f), true);
+
+            D2D1_RECT_F incR = D2D1::RectF(mx + mw - 68.0f, rowY, mx + mw - 42.0f, rowY + 24.0f);
+            rt_->FillRoundedRectangle(D2D1::RoundedRect(incR, 4, 4), brBg_.Get());
+            rt_->DrawRoundedRectangle(D2D1::RoundedRect(incR, 4, 4), brBorder_.Get(), 1.0f);
+            drawText(L"+", fmtCenter_.Get(), incR, brText_.Get());
+            addHit(CTRL_SB_SPLIT_INC, incR);
+
+            int splitPct = static_cast<int>(std::lround(norm * 100.0f));
+            D2D1_RECT_F pctR = D2D1::RectF(mx + mw - 38.0f, rowY, mx + mw, rowY + 24.0f);
+            rt_->FillRoundedRectangle(D2D1::RoundedRect(pctR, 4, 4), brBg_.Get());
+            rt_->DrawRoundedRectangle(D2D1::RoundedRect(pctR, 4, 4), brBorder_.Get(), 1.0f);
+            drawText(std::to_wstring(splitPct) + L"%", fmtCenter_.Get(), pctR, brText_.Get());
+
+            drawText(L"Alt+[ / ] resize split  \u2022  Alt+\\ toggle", fmtSmall_.Get(),
+                     D2D1::RectF(mx, y + 69.0f, mx + mw, y + 87.0f), brTextMuted_.Get());
+        }
+        y += sCardH + 10.0f;
+    }
+
     int profIdx = (config_->activeProfile >= 1 && config_->activeProfile <= 3) ? (config_->activeProfile - 1) : 0;
     FilterParams& fp = config_->profiles[profIdx];
 
@@ -395,11 +519,11 @@ void SidebarUI::Render() {
         D2D1_RECT_F offCard = D2D1::RectF(pad, y, pad + cardW, y + 66.0f);
         rt_->FillRoundedRectangle(D2D1::RoundedRect(offCard, 8, 8), brCard_.Get());
         rt_->DrawRoundedRectangle(D2D1::RoundedRect(offCard, 8, 8), brBorder_.Get(), 1.0f);
-        drawText(L"Profile None active (Overlay Off • 0% GPU load).\nSelect Profile 1, 2, or 3 above to enable filters.",
+        drawText(L"Color filters bypassed.\nSelect Profile 1, 2, or 3 above to enable visual filters.",
                  fmtSub_.Get(), D2D1::RectF(mx, y + 14, mx + mw, y + 56), brTextMuted_.Get());
         y += 76.0f;
     } else {
-        // --- Unified Filters List (all 12 modular filters aligned seamlessly) ---
+        // --- Unified Filters List (all 16 modular filters aligned seamlessly) ---
         drawText(L"Filters", fmtSection_.Get(), D2D1::RectF(pad, y, W - pad, y + 20), brText_.Get());
         y += 24.0f;
 
@@ -413,7 +537,7 @@ void SidebarUI::Render() {
             float cy = y + 12.0f;
             drawFilterCardHeader(
                 L"AI Dynamic Vibrance",
-                L"Adaptive dark contrast + perceptual Oklab vibrance",
+                L"Adaptive perceptual Oklab color and contrast engine",
                 fp.enableDynamicVibrance,
                 CTRL_TOGGLE_VIBRANCE,
                 CTRL_RESET_VIBRANCE,
@@ -423,7 +547,7 @@ void SidebarUI::Render() {
             if (fp.enableDynamicVibrance) {
                 cy += 30.0f;
                 drawSlider(CTRL_SLIDER_INTENSITY, L"Intensity (%)", fp.intensity, mx, cy, mw);
-                drawSlider(CTRL_SLIDER_SATURATION, L"Saturation boost (%)", fp.saturationBoost, mx, cy, mw);
+                drawSlider(CTRL_SLIDER_SATURATION, L"Saturation Boost (%)", fp.saturationBoost, mx, cy, mw);
             }
             y += cH + 8.0f;
         }
@@ -463,40 +587,114 @@ void SidebarUI::Render() {
             y += cH + 8.0f;
         };
 
-        drawOptSingle(L"Sharpen+ (AMD CAS)", L"Contrast-adaptive crispness for blurry / TAA games", L"Sharpness (%)",
+        drawOptSingle(L"Sharpen+ (AMD CAS)", L"Contrast-adaptive edge sharpening for TAA reconstruction", L"Sharpness (%)",
                       fp.enableSharpen, fp.sharpen, CTRL_TOGGLE_SHARPEN, CTRL_RESET_SHARPEN, CTRL_SLIDER_SHARPEN);
-        drawOptSingle(L"Dynamic HDR", L"Tonal contrast & highlight roll-off", L"HDR Strength (%)",
-                      fp.enableDynamicHdr, fp.dynamicHdr, CTRL_TOGGLE_HDR, CTRL_RESET_HDR, CTRL_SLIDER_HDR);
-        drawOptSingle(L"Dark / Shadow Lighting", L"Extra shadow visibility boost", L"Shadow Boost (%)",
+
+        // Dynamic HDR card (scRGB HDR10 when Windows HDR is active, or Local Tone Mapping in SDR)
+        {
+            float cH = fp.enableDynamicHdr ? 232.0f : 46.0f;
+            D2D1_RECT_F cR = D2D1::RectF(pad, y, pad + cardW, y + cH);
+            rt_->FillRoundedRectangle(D2D1::RoundedRect(cR, 8, 8), brCard_.Get());
+            rt_->DrawRoundedRectangle(D2D1::RoundedRect(cR, 8, 8),
+                                      (fp.enableDynamicHdr && displayHdr_.hdrActive) ? brAccent_.Get() : brBorder_.Get(), 1.0f);
+
+            float cy = y + 12.0f;
+            std::wstring hdrSub = displayHdr_.hdrActive
+                ? L"Active 16-bit scRGB HDR10 display pipeline"
+                : L"Adaptive local tone mapping and highlight expansion";
+            drawFilterCardHeader(L"Dynamic HDR", hdrSub, fp.enableDynamicHdr, CTRL_TOGGLE_HDR, CTRL_RESET_HDR, cy, displayHdr_.hdrActive);
+            if (fp.enableDynamicHdr) {
+                cy += 28.0f;
+                D2D1_RECT_F pillR = D2D1::RectF(mx, cy, mx + mw, cy + 22.0f);
+                rt_->FillRoundedRectangle(D2D1::RoundedRect(pillR, 4, 4), displayHdr_.hdrActive ? brAccentSoft_.Get() : brBg_.Get());
+                rt_->DrawRoundedRectangle(D2D1::RoundedRect(pillR, 4, 4), displayHdr_.hdrActive ? brAccent_.Get() : brBorder_.Get(), 1.0f);
+                std::wstring badgeLine = displayHdr_.hdrActive
+                    ? (L"scRGB HDR10 Active  \u2022  Display Peak " + std::to_wstring(static_cast<int>(std::lround(displayHdr_.maxLuminanceNits))) + L" nits")
+                    : L"Local SDR Tone Mapping  \u2022  Windows HDR Off";
+                drawText(badgeLine, fmtSmall_.Get(), D2D1::RectF(pillR.left + 8, pillR.top + 3.5f, pillR.right - 8, pillR.bottom),
+                         displayHdr_.hdrActive ? brText_.Get() : brTextMuted_.Get());
+                cy += 30.0f;
+
+                drawSlider(CTRL_SLIDER_HDR, L"HDR Intensity (%)", fp.dynamicHdr, mx, cy, mw);
+                drawRangeSlider(CTRL_SLIDER_HDR_PEAK, L"Peak Brightness (nits)", fp.hdrPeakNits, 300, 1500, mx, cy, mw, false, 50.0f);
+                drawSlider(CTRL_SLIDER_HDR_MIDGRAY, L"Mid Gray / Contrast (%)", fp.hdrMidGray, mx, cy, mw, true);
+            }
+            y += cH + 8.0f;
+        }
+
+        drawOptSingle(L"Dark / Shadow Lighting", L"Perceptual shadow recovery with deep black preservation", L"Shadow Boost (%)",
                       fp.enableDarkLighting, fp.darkLighting, CTRL_TOGGLE_DARK, CTRL_RESET_DARK, CTRL_SLIDER_DARK);
-        drawOptSingle(L"Clarity / Details", L"Local micro-contrast sharpness", L"Clarity (%)",
+        drawOptDouble(L"Ambient Occlusion", L"Screen-space crevice depth and contact shading",
+                      L"Intensity (%)", fp.ambientOcclusion, CTRL_SLIDER_AO_INTENSITY,
+                      L"Radius (%)", fp.aoRadius, CTRL_SLIDER_AO_RADIUS,
+                      fp.enableAmbientOcclusion, CTRL_TOGGLE_AO, CTRL_RESET_AO, false);
+        drawOptSingle(L"Clarity / Details", L"Dual-scale edge-preserving local micro-contrast", L"Clarity (%)",
                       fp.enableClarity, fp.clarity, CTRL_TOGGLE_CLARITY, CTRL_RESET_CLARITY, CTRL_SLIDER_CLARITY);
 
-        drawOptDouble(L"Brightness / Contrast", L"Manual adjustment (50 = neutral)",
+        drawOptDouble(L"Cinematic Bloom", L"Soft-knee optical glow for neon, fire, and highlights",
+                      L"Intensity (%)", fp.bloomIntensity, CTRL_SLIDER_BLOOM_INT,
+                      L"Threshold (%)", fp.bloomThreshold, CTRL_SLIDER_BLOOM_THRESH,
+                      fp.enableBloom, CTRL_TOGGLE_BLOOM, CTRL_RESET_BLOOM, false);
+
+        // Filmic Grading (3-button selector ACES / AgX / Technicolor + strength slider)
+        {
+            float cH = fp.enableFilmic ? 136.0f : 46.0f;
+            D2D1_RECT_F cR = D2D1::RectF(pad, y, pad + cardW, y + cH);
+            rt_->FillRoundedRectangle(D2D1::RoundedRect(cR, 8, 8), brCard_.Get());
+            rt_->DrawRoundedRectangle(D2D1::RoundedRect(cR, 8, 8), brBorder_.Get(), 1.0f);
+
+            float cy = y + 12.0f;
+            drawFilterCardHeader(L"Filmic Grading", L"Cinema tone mapping with ACES, AgX, and Technicolor",
+                                 fp.enableFilmic, CTRL_TOGGLE_FILMIC, CTRL_RESET_FILMIC, cy, false);
+            if (fp.enableFilmic) {
+                cy += 30.0f;
+                const wchar_t* fNames[3] = { L"ACES", L"AgX", L"Technicolor" };
+                ControlKind fKinds[3] = { CTRL_FILMIC_MODE_0, CTRL_FILMIC_MODE_1, CTRL_FILMIC_MODE_2 };
+                float bGap = 6.0f;
+                float bW = (mw - bGap * 2.0f) / 3.0f;
+                for (int i = 0; i < 3; ++i) {
+                    float bx = mx + i * (bW + bGap);
+                    D2D1_RECT_F br = D2D1::RectF(bx, cy, bx + bW, cy + 26.0f);
+                    bool sel = (fp.filmicMode == i);
+                    rt_->FillRoundedRectangle(D2D1::RoundedRect(br, 4, 4), sel ? brAccentSoft_.Get() : brBg_.Get());
+                    rt_->DrawRoundedRectangle(D2D1::RoundedRect(br, 4, 4), sel ? brAccent_.Get() : brBorder_.Get(), sel ? 1.5f : 1.0f);
+                    drawText(fNames[i], fmtCenter_.Get(), br, sel ? brText_.Get() : brTextMuted_.Get());
+                    addHit(fKinds[i], br);
+                }
+                cy += 34.0f;
+                drawSlider(CTRL_SLIDER_FILMIC_STR, L"Grading Strength (%)", fp.filmicStrength, mx, cy, mw);
+            }
+            y += cH + 8.0f;
+        }
+
+        drawOptSingle(L"Deband", L"Edge-aware gradient smoothing for 8-bit sky and shadows", L"Strength (%)",
+                      fp.enableDeband, fp.debandStrength, CTRL_TOGGLE_DEBAND, CTRL_RESET_DEBAND, CTRL_SLIDER_DEBAND);
+
+        drawOptDouble(L"Brightness / Contrast", L"Filmic luminance gain and tonal contrast curve",
                       L"Brightness (%)", fp.brightness, CTRL_SLIDER_BRIGHTNESS,
                       L"Contrast (%)", fp.contrast, CTRL_SLIDER_CONTRAST,
                       fp.enableBrightnessContrast, CTRL_TOGGLE_BC, CTRL_RESET_BC, true);
 
-        drawOptDouble(L"Color Temperature & Tint", L"Cool / Warm white balance & tint (50 = neutral)",
+        drawOptDouble(L"Color Temperature & Tint", L"Luminance-preserved white balance and tint calibration",
                       L"Temperature (%)", fp.temperature, CTRL_SLIDER_TEMPERATURE,
                       L"Tint (%)", fp.tint, CTRL_SLIDER_TINT,
                       fp.enableColorTemp, CTRL_TOGGLE_COLORTEMP, CTRL_RESET_COLORTEMP, true);
 
-        drawOptDouble(L"Gamma / Exposure", L"Midtone curve & exposure compensation (50 = neutral)",
+        drawOptDouble(L"Gamma / Exposure", L"Midtone transfer curve and photographic EV compensation",
                       L"Exposure (%)", fp.exposure, CTRL_SLIDER_EXPOSURE,
                       L"Gamma (%)", fp.gamma, CTRL_SLIDER_GAMMA,
                       fp.enableGammaExposure, CTRL_TOGGLE_GAMMAEXP, CTRL_RESET_GAMMAEXP, true);
 
-        drawOptSingle(L"Night Mode / Blue Light", L"Reduces blue light for late-night sessions", L"Warmth (%)",
+        drawOptSingle(L"Night Mode / Blue Light", L"Spectral blue-light attenuation for low-light viewing", L"Warmth (%)",
                       fp.enableNightMode, fp.nightMode, CTRL_TOGGLE_NIGHT, CTRL_RESET_NIGHT, CTRL_SLIDER_NIGHT);
 
-        drawOptSingle(L"Black & White", L"Cinematic Rec.709 monochrome mix", L"Intensity (%)",
+        drawOptSingle(L"Black & White", L"Luminance-weighted Rec.709 monochrome conversion", L"Intensity (%)",
                       fp.enableBlackAndWhite, fp.blackAndWhite, CTRL_TOGGLE_BW, CTRL_RESET_BW, CTRL_SLIDER_BW);
 
-        drawOptSingle(L"Cinematic Vignette", L"Soft dark corner framing", L"Strength (%)",
+        drawOptSingle(L"Cinematic Vignette", L"Optical lens peripheral falloff and edge framing", L"Strength (%)",
                       fp.enableVignette, fp.vignette, CTRL_TOGGLE_VIGNETTE, CTRL_RESET_VIGNETTE, CTRL_SLIDER_VIGNETTE);
 
-        // 12. Colorblind Assist (3-button mode selector + strength slider)
+        // 16. Colorblind Assist (3-button mode selector + strength slider)
         {
             float cH = fp.enableColorblind ? 136.0f : 46.0f;
             D2D1_RECT_F cR = D2D1::RectF(pad, y, pad + cardW, y + cH);
@@ -504,7 +702,7 @@ void SidebarUI::Render() {
             rt_->DrawRoundedRectangle(D2D1::RoundedRect(cR, 8, 8), brBorder_.Get(), 1.0f);
 
             float cy = y + 12.0f;
-            drawFilterCardHeader(L"Colorblind Assist", L"LMS daltonization (Protanopia / Deuteranopia / Tritanopia)",
+            drawFilterCardHeader(L"Colorblind Assist", L"LMS cone-space daltonization for color vision support",
                                  fp.enableColorblind, CTRL_TOGGLE_COLORBLIND, CTRL_RESET_COLORBLIND, cy, false);
             if (fp.enableColorblind) {
                 cy += 30.0f;
@@ -539,7 +737,8 @@ void SidebarUI::Render() {
     rt_->FillRectangle(D2D1::RectF(0, H - footerH, W, H), brBg_.Get());
     rt_->DrawLine(D2D1::Point2F(0, H - footerH), D2D1::Point2F(W, H - footerH), brBorder_.Get(), 1.0f);
 
-    drawText(L"GPU: " + adapterName_, fmtSmall_.Get(), D2D1::RectF(pad, H - footerH + 10, W - 118, H - footerH + 28), brTextMuted_.Get());
+    std::wstring gpuLine = L"GPU: " + adapterName_ + (displayHdr_.hdrActive ? L" \u2022 HDR" : L"");
+    drawText(gpuLine, fmtSmall_.Get(), D2D1::RectF(pad, H - footerH + 10, W - 118, H - footerH + 28), brTextMuted_.Get());
     if (activeAppIsGame_) {
         drawText(L"Game: " + activeAppTitle_ + L" (" + activeEngineTag_ + L")", fmtSmall_.Get(),
                  D2D1::RectF(pad, H - footerH + 28, W - 118, H - 8), brAccent_.Get());
@@ -574,8 +773,20 @@ void SidebarUI::UpdateSliderFromX(ControlKind kind, float dipX, const D2D1_RECT_
         case CTRL_SLIDER_SATURATION:   fp.saturationBoost = val; break;
         case CTRL_SLIDER_SHARPEN:      fp.sharpen = val; break;
         case CTRL_SLIDER_DARK:         fp.darkLighting = val; break;
+        case CTRL_SLIDER_AO_INTENSITY: fp.ambientOcclusion = val; break;
+        case CTRL_SLIDER_AO_RADIUS:    fp.aoRadius = val; break;
         case CTRL_SLIDER_CLARITY:      fp.clarity = val; break;
+        case CTRL_SLIDER_BLOOM_INT:    fp.bloomIntensity = val; break;
+        case CTRL_SLIDER_BLOOM_THRESH: fp.bloomThreshold = val; break;
+        case CTRL_SLIDER_FILMIC_STR:   fp.filmicStrength = val; break;
+        case CTRL_SLIDER_DEBAND:       fp.debandStrength = val; break;
         case CTRL_SLIDER_HDR:          fp.dynamicHdr = val; break;
+        case CTRL_SLIDER_HDR_PEAK: {
+            int nits = 300 + static_cast<int>(std::lround(norm * 120.0f)) * 10;
+            fp.hdrPeakNits = std::clamp(nits, 300, 1500);
+            break;
+        }
+        case CTRL_SLIDER_HDR_MIDGRAY:  fp.hdrMidGray = val; break;
         case CTRL_SLIDER_BRIGHTNESS:   fp.brightness = val; break;
         case CTRL_SLIDER_CONTRAST:     fp.contrast = val; break;
         case CTRL_SLIDER_TEMPERATURE:  fp.temperature = val; break;
@@ -586,6 +797,11 @@ void SidebarUI::UpdateSliderFromX(ControlKind kind, float dipX, const D2D1_RECT_
         case CTRL_SLIDER_BW:           fp.blackAndWhite = val; break;
         case CTRL_SLIDER_VIGNETTE:     fp.vignette = val; break;
         case CTRL_SLIDER_CBSTRENGTH:   fp.colorblindStrength = val; break;
+        case CTRL_SB_SLIDER_SPLIT:
+            config_->splitPosition = std::clamp(norm, 0.05f, 0.95f);
+            Render();
+            if (callbacks_.onConfigChanged) callbacks_.onConfigChanged();
+            return;
         default: break;
     }
     Render();
@@ -659,6 +875,10 @@ void SidebarUI::HandleMouseDown(float dipX, float dipY) {
                     return;
                 case CTRL_RESET_HDR:
                     fp.dynamicHdr = 50;
+                    fp.hdrPeakNits = displayHdr_.hdrActive
+                        ? std::clamp(static_cast<int>(std::lround(displayHdr_.maxLuminanceNits / 10.0f)) * 10, 300, 1500)
+                        : 800;
+                    fp.hdrMidGray = 50;
                     Render();
                     if (callbacks_.onConfigChanged) callbacks_.onConfigChanged();
                     return;
@@ -674,6 +894,18 @@ void SidebarUI::HandleMouseDown(float dipX, float dipY) {
                     if (callbacks_.onConfigChanged) callbacks_.onConfigChanged();
                     return;
 
+                case CTRL_TOGGLE_AO:
+                    fp.enableAmbientOcclusion = !fp.enableAmbientOcclusion;
+                    Render();
+                    if (callbacks_.onConfigChanged) callbacks_.onConfigChanged();
+                    return;
+                case CTRL_RESET_AO:
+                    fp.ambientOcclusion = 50;
+                    fp.aoRadius = 50;
+                    Render();
+                    if (callbacks_.onConfigChanged) callbacks_.onConfigChanged();
+                    return;
+
                 case CTRL_TOGGLE_CLARITY:
                     fp.enableClarity = !fp.enableClarity;
                     Render();
@@ -681,6 +913,48 @@ void SidebarUI::HandleMouseDown(float dipX, float dipY) {
                     return;
                 case CTRL_RESET_CLARITY:
                     fp.clarity = 50;
+                    Render();
+                    if (callbacks_.onConfigChanged) callbacks_.onConfigChanged();
+                    return;
+
+                case CTRL_TOGGLE_BLOOM:
+                    fp.enableBloom = !fp.enableBloom;
+                    Render();
+                    if (callbacks_.onConfigChanged) callbacks_.onConfigChanged();
+                    return;
+                case CTRL_RESET_BLOOM:
+                    fp.bloomIntensity = 50;
+                    fp.bloomThreshold = 60;
+                    Render();
+                    if (callbacks_.onConfigChanged) callbacks_.onConfigChanged();
+                    return;
+
+                case CTRL_TOGGLE_FILMIC:
+                    fp.enableFilmic = !fp.enableFilmic;
+                    Render();
+                    if (callbacks_.onConfigChanged) callbacks_.onConfigChanged();
+                    return;
+                case CTRL_FILMIC_MODE_0:
+                case CTRL_FILMIC_MODE_1:
+                case CTRL_FILMIC_MODE_2:
+                    fp.filmicMode = static_cast<int>(hr.kind - CTRL_FILMIC_MODE_0);
+                    Render();
+                    if (callbacks_.onConfigChanged) callbacks_.onConfigChanged();
+                    return;
+                case CTRL_RESET_FILMIC:
+                    fp.filmicMode = 0;
+                    fp.filmicStrength = 50;
+                    Render();
+                    if (callbacks_.onConfigChanged) callbacks_.onConfigChanged();
+                    return;
+
+                case CTRL_TOGGLE_DEBAND:
+                    fp.enableDeband = !fp.enableDeband;
+                    Render();
+                    if (callbacks_.onConfigChanged) callbacks_.onConfigChanged();
+                    return;
+                case CTRL_RESET_DEBAND:
+                    fp.debandStrength = 50;
                     Render();
                     if (callbacks_.onConfigChanged) callbacks_.onConfigChanged();
                     return;
@@ -769,6 +1043,42 @@ void SidebarUI::HandleMouseDown(float dipX, float dipY) {
                 case CTRL_RESET_COLORBLIND:
                     fp.colorblindType = 0;
                     fp.colorblindStrength = 50;
+                    Render();
+                    if (callbacks_.onConfigChanged) callbacks_.onConfigChanged();
+                    return;
+
+                case CTRL_SB_SCALE_0:
+                case CTRL_SB_SCALE_1:
+                case CTRL_SB_SCALE_2:
+                case CTRL_SB_SCALE_3:
+                case CTRL_SB_SCALE_4:
+                    config_->scaleMode = static_cast<int>(hr.kind - CTRL_SB_SCALE_0);
+                    Render();
+                    if (callbacks_.onConfigChanged) callbacks_.onConfigChanged();
+                    return;
+
+                case CTRL_SB_FG_0:
+                case CTRL_SB_FG_1:
+                case CTRL_SB_FG_2:
+                case CTRL_SB_FG_3:
+                case CTRL_SB_FG_4:
+                    config_->fgMode = static_cast<int>(hr.kind - CTRL_SB_FG_0);
+                    Render();
+                    if (callbacks_.onConfigChanged) callbacks_.onConfigChanged();
+                    return;
+
+                case CTRL_SB_TOGGLE_SPLIT:
+                    config_->splitPreview = !config_->splitPreview;
+                    Render();
+                    if (callbacks_.onConfigChanged) callbacks_.onConfigChanged();
+                    return;
+                case CTRL_SB_SPLIT_DEC:
+                    config_->splitPosition = std::clamp(config_->splitPosition - 0.05f, 0.05f, 0.95f);
+                    Render();
+                    if (callbacks_.onConfigChanged) callbacks_.onConfigChanged();
+                    return;
+                case CTRL_SB_SPLIT_INC:
+                    config_->splitPosition = std::clamp(config_->splitPosition + 0.05f, 0.05f, 0.95f);
                     Render();
                     if (callbacks_.onConfigChanged) callbacks_.onConfigChanged();
                     return;
